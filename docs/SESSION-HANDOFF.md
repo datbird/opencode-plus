@@ -78,4 +78,13 @@ Local repo path in this environment:
 
 The local directory name is historical; the public project name is OpenCode Plus.
 
-Current working tree note: the repo may intentionally contain uncommitted source/doc changes from the workspace default pass. Do not revert them unless Robert explicitly asks.
+## GitHub Auth
+
+- Pushes to `datbird/opencode-plus` should use the 1Password item `GitHub PAT Token (Unraid)` in the `Private` vault through a one-shot Git credential helper.
+- Do not store the token in Git remotes or global Git config, and do not print it in logs or chat.
+- As of 2026-05-03, Robert regenerated the Unraid PAT and updated the 1Password item. Validation passed as GitHub user `datbird` with `push=true` and `admin=true` for `datbird/opencode-plus`.
+- Commit `8470674 Update workspace defaults and handoff docs` was pushed to `origin/main` with that refreshed token.
+- `GitHub PAT (Budgetron)` authenticated as `datbird` but returned permission denied for this repo during testing.
+- `Github`/`GitHub` beamflash tokens authenticated as `beamflash` and did not have push access to this repo.
+
+Current working tree note: the repo should be clean and synced after commit `8470674`. If future sessions see local changes, inspect them before editing and do not revert unrelated work unless Robert explicitly asks.
