@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+export HOME=/root
+export USER=root
+export LOGNAME=root
+export PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+export OPENCODE_SERVER_HOSTNAME="${OPENCODE_SERVER_HOSTNAME:-0.0.0.0}"
+export OPENCODE_SERVER_PORT="${OPENCODE_SERVER_PORT:-4096}"
+export OPENCODE_LOG_LEVEL="${OPENCODE_LOG_LEVEL:-INFO}"
+
+cd /data/aiplayground
+exec opencode serve --hostname "$OPENCODE_SERVER_HOSTNAME" --port "$OPENCODE_SERVER_PORT" --print-logs --log-level "$OPENCODE_LOG_LEVEL"
