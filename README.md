@@ -2,6 +2,17 @@
 
 Unofficial enhanced OpenCode server images for Docker and Unraid.
 
+OpenCode Plus packages OpenCode Server with a durable Ubuntu-based remote development environment, an optional Cloudflare Access aware gateway, SSH access, persistent workspace mounts, and three image sizes for different use cases.
+
+OpenCode Plus is not affiliated with or endorsed by the upstream OpenCode project.
+
+Documentation:
+
+- [Configuration](docs/CONFIGURATION.md)
+- [Unraid Deployment](docs/UNRAID.md)
+- [Development and Publishing](docs/DEVELOPMENT.md)
+- [Session and Memory Handoff](docs/SESSION-HANDOFF.md)
+
 Image variants:
 
 | Tag | Target | Intended Use |
@@ -18,6 +29,27 @@ Runtime mounts:
 - `/var/run/docker.sock`: host Docker socket when launched on Unraid.
 
 This image is designed as a clean baseline for a durable OpenCode server. Live installs inside a running container can be tested, then promoted back into this Dockerfile.
+
+Quick start:
+
+Build the image locally first, or use the published image once container registry publishing is enabled.
+
+```bash
+docker run -d \
+  --name opencode-plus \
+  --restart unless-stopped \
+  -p 4096:4096 \
+  -p 2222:22 \
+  -v opencode-plus-config:/config \
+  -v /path/to/workspace:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e ROOT_PASSWORD='change-me' \
+  -e OPENCODE_SERVER_USERNAME='datbird' \
+  -e OPENCODE_SERVER_PASSWORD='change-me' \
+  datbird/opencode-plus:dev
+```
+
+For the Cloudflare Access gateway, expose the gateway port configured in `/config/persist/opencode-cf-auth-proxy.env` instead of exposing OpenCode directly. The gateway health endpoint is `GET /__health`.
 
 Build examples:
 
@@ -53,5 +85,3 @@ Publishing notes:
 - Build targets map directly to tags: `base`, `dev`, and `full`.
 - Tag `latest` to `dev` unless you intentionally want the largest image to be the default.
 - The Unraid template should usually reference `:dev` or `:latest`; `:full` is for users who explicitly want media/PDF/chart tooling baked in.
-
-OpenCode Plus is not affiliated with or endorsed by the upstream OpenCode project.
