@@ -27,7 +27,7 @@ Runtime mounts:
 - `/config`: persistent app/config state.
 - `/root/workspace`: default workspace directory where `opencode serve` starts.
 - `/root/repos`: default directory for local Git clones.
-- `/data`: optional mount root for Unraid or custom layouts.
+- `/data`: optional compatibility mount root for Unraid or custom layouts; it is not created as a Docker volume by default.
 - `/var/run/docker.sock`: host Docker socket when launched on Unraid.
 
 Workspace paths are configurable with `OPENCODE_WORKSPACE_DIR` and `OPENCODE_REPOS_DIR`. New installs should keep real workspace directories under `/root` so the OpenCode web project picker can discover them from `path.home`.
@@ -49,12 +49,12 @@ docker run -d \
   -v /path/to/repos:/root/repos \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e ROOT_PASSWORD='change-me' \
-  -e OPENCODE_SERVER_USERNAME='datbird' \
+  -e OPENCODE_SERVER_USERNAME='opencode' \
   -e OPENCODE_SERVER_PASSWORD='change-me' \
   datbird/opencode-plus:dev
 ```
 
-For the Cloudflare Access gateway, expose the gateway port configured in `/config/persist/opencode-cf-auth-proxy.env` instead of exposing OpenCode directly. The gateway health endpoint is `GET /__health`.
+The Cloudflare Access gateway is disabled by default. To enable it, set `OPENCODE_CF_AUTH_ENABLED=true` and provide the required `CF_ACCESS_*`, `ALLOWED_EMAILS`, and upstream basic-auth environment variables. When enabled, expose the gateway port instead of exposing OpenCode directly. The gateway health endpoint is `GET /__health`.
 
 Build examples:
 

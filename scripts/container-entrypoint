@@ -7,6 +7,7 @@ export LOGNAME=root
 export PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
 export OPENCODE_REPOS_DIR="${OPENCODE_REPOS_DIR:-/root/repos}"
+export OPENCODE_CF_AUTH_ENABLED="${OPENCODE_CF_AUTH_ENABLED:-false}"
 
 mkdir -p /config/persist/root /config/logs "$OPENCODE_WORKSPACE_DIR" "$OPENCODE_REPOS_DIR" /root/.ssh /run/sshd /var/log/supervisor
 
@@ -37,6 +38,49 @@ chmod 600 /root/.ssh/* 2>/dev/null || true
 if [[ -n "${ROOT_PASSWORD:-}" ]]; then
   printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd
 fi
+
+write_gateway_env() {
+  local env_file="/config/persist/opencode-cf-auth-proxy.env"
+  local skip_aud="${CF_ACCESS_SKIP_AUD:-false}"
+  local basic_user="${OPENCODE_BASIC_USER:-${OPENCODE_SERVER_USERNAME:-}}"
+  local basic_password="${OPENCODE_BASIC_PASSWORD:-${OPENCODE_SERVER_PASSWORD:-}}"
+
+  if [[ "${skip_aud}" != "true" && -z "${CF_ACCESS_AUD:-}" ]]; then
+    echo "OPENCODE_CF_AUTH_ENABLED=true requires CF_ACCESS_AUD unless CF_ACCESS_SKIP_AUD=true" >&2
+    exit 1
+  fi
+  if [[ -z "${ALLOWED_EMAILS:-}" ]]; then
+    echo "OPENCODE_CF_AUTH_ENABLED=true requires ALLOWED_EMAILS" >&2
+    exit 1
+  fi
+  if [[ -z "${OPENCODE_BASIC_AUTH_B64:-}" && ( -z "${basic_user}" || -z "${basic_password}" ) ]]; then
+    echo "OPENCODE_CF_AUTH_ENABLED=true requires OPENCODE_BASIC_AUTH_B64 or OpenCode basic auth user/password" >&2
+    exit 1
+  fi
+
+  {
+    printf 'LISTEN_ADDR=%q\n' "${OPENCODE_CF_AUTH_LISTEN_ADDR:-0.0.0.0:4097}"
+    printf 'UPSTREAM_URL=%q\n' "${OPENCODE_CF_AUTH_UPSTREAM_URL:-http://127.0.0.1:${OPENCODE_SERVER_PORT:-4096}}"
+    printf 'CF_ACCESS_AUD=%q\n' "${CF_ACCESS_AUD:-}"
+    printf 'CF_ACCESS_SKIP_AUD=%q\n' "${skip_aud}"
+    printf 'TRUSTED_CF_ISSUER_SUFFIX=%q\n' "${TRUSTED_CF_ISSUER_SUFFIX:-.cloudflareaccess.com}"
+    printf 'ALLOWED_EMAILS=%q\n' "${ALLOWED_EMAILS}"
+    if [[ -n "${OPENCODE_BASIC_AUTH_B64:-}" ]]; then
+      printf 'OPENCODE_BASIC_AUTH_B64=%q\n' "${OPENCODE_BASIC_AUTH_B64}"
+    else
+      printf 'OPENCODE_BASIC_USER=%q\n' "${basic_user}"
+      printf 'OPENCODE_BASIC_PASSWORD=%q\n' "${basic_password}"
+    fi
+    printf 'OPENCODE_ROOT_REDIRECT_PATH=%q\n' "${OPENCODE_ROOT_REDIRECT_PATH:-/}"
+  } > "${env_file}"
+  chmod 600 "${env_file}" || true
+}
+
+case "${OPENCODE_CF_AUTH_ENABLED}" in
+  true|TRUE|1|yes|YES) export OPENCODE_CF_AUTH_ENABLED=true; write_gateway_env ;;
+  false|FALSE|0|no|NO|"") export OPENCODE_CF_AUTH_ENABLED=false ;;
+  *) echo "OPENCODE_CF_AUTH_ENABLED must be true or false" >&2; exit 1 ;;
+esac
 
 ssh-keygen -A >/dev/null 2>&1 || true
 

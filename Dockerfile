@@ -114,7 +114,7 @@ RUN chmod 0755 /usr/local/bin/opencode-* /usr/local/bin/container-entrypoint /us
       /etc/ssh/sshd_config \
     && ssh-keygen -A
 
-VOLUME ["/config", "/data"]
+VOLUME ["/config"]
 
 EXPOSE 22 4096 4097
 

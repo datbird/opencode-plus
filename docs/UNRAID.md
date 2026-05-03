@@ -13,12 +13,6 @@ Use `datbird/opencode-plus:dev` for the default Unraid install. Use `:base` for 
 - Repos: optionally map a separate host repo path to `/root/repos`.
 - Docker socket: `/var/run/docker.sock:/var/run/docker.sock`
 
-Current migrated containers:
-
-- `opencode1`: `172.25.1.8`, WebUI `http://172.25.1.8:4097/`.
-- `opencode2`: `172.25.1.9`, WebUI `http://172.25.1.9:4097/`.
-- `opencode1` was previously named `opencode-ubuntu`; use `opencode1` in Docker and Unraid references going forward.
-
 The entrypoint creates:
 
 - `/root/workspace` from `OPENCODE_WORKSPACE_DIR` by default.
@@ -38,7 +32,7 @@ The entrypoint creates:
 docker run -d \
   --name opencode-plus \
   --restart unless-stopped \
-  -p 4097:4097 \
+  -p 4096:4096 \
   -p 2222:22 \
   -v /mnt/user/appdata/opencode-plus:/config:rw \
   -v /mnt/user/appdata/opencode-workspace:/root/workspace:rw \
@@ -46,14 +40,14 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock:rw \
   -e TZ=America/Chicago \
   -e ROOT_PASSWORD='change-me' \
-  -e OPENCODE_SERVER_USERNAME='datbird' \
+  -e OPENCODE_SERVER_USERNAME='opencode' \
   -e OPENCODE_SERVER_PASSWORD='change-me' \
   -e OPENCODE_SERVER_HOSTNAME=0.0.0.0 \
   -e OPENCODE_SERVER_PORT=4096 \
   datbird/opencode-plus:dev
 ```
 
-For Robert's migrated `opencode2` container, use `OPENCODE_WORKSPACE_DIR=/root/aiplayground` and `OPENCODE_REPOS_DIR=/root/gitrepos` as the canonical environment variables. Keep matching bind mounts at both `/root/...` and `/data/...` only when compatibility with older session rows or tooling is needed.
+For migrated containers, use a single canonical workspace in `OPENCODE_WORKSPACE_DIR`. Prefer a real path under `/root`, such as `/root/workspace`, and only keep matching `/data/...` mounts when compatibility with older session rows or tooling is needed.
 
 ## Unraid Labels
 
@@ -77,10 +71,12 @@ This keeps auth, sessions, model metadata, memories, and tool output durable acr
 
 ## Cloudflare Access
 
-Create:
+Cloudflare Access is disabled by default. To enable it, add the gateway port mapping, set `OPENCODE_CF_AUTH_ENABLED=true`, and provide the gateway environment variables documented in `docs/CONFIGURATION.md`.
+
+The entrypoint writes generated gateway config to:
 
 ```text
 /mnt/user/appdata/opencode-plus/persist/opencode-cf-auth-proxy.env
 ```
 
-Use `opencode-cf-auth-proxy.env.example` as the template. Route Cloudflare Tunnel or a reverse proxy to port `4097` when using the gateway.
+Use `opencode-cf-auth-proxy.env.example` as a reference template. Route Cloudflare Tunnel or a reverse proxy to port `4097` when using the gateway.

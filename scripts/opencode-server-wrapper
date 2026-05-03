@@ -12,7 +12,8 @@ export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
 
 mkdir -p "$OPENCODE_WORKSPACE_DIR"
 cd "$OPENCODE_WORKSPACE_DIR"
-export PWD="$(pwd -P)"
+PWD="$(pwd -P)"
+export PWD
 
 opencode serve --hostname "$OPENCODE_SERVER_HOSTNAME" --port "$OPENCODE_SERVER_PORT" --print-logs --log-level "$OPENCODE_LOG_LEVEL" &
 opencode_pid="$!"
