@@ -12,12 +12,13 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 
 ## Core Environment Variables
 
-- `ROOT_PASSWORD`: root SSH password inside the container.
+- `ROOT_PASSWORD`: root SSH password inside the container when Plus mode is enabled.
 - `OPENCODE_SERVER_USERNAME`: OpenCode server Basic Auth username.
 - `OPENCODE_SERVER_PASSWORD`: OpenCode server Basic Auth password.
 - `OPENCODE_SERVER_HOSTNAME`: OpenCode bind host. Defaults to `0.0.0.0`.
 - `OPENCODE_SERVER_PORT`: OpenCode upstream port. Defaults to `4096`.
 - `OPENCODE_LOG_LEVEL`: OpenCode log level. Defaults to `INFO`.
+- `OPENCODE_PLUS_ENHANCEMENT_MODE`: enables OpenCode Plus runtime behavior. Defaults to `true`. Set to `false` for a plain OpenCode server.
 - `TZ`: container timezone.
 
 ## Workspace Environment Variables
@@ -36,6 +37,18 @@ For migrated or compatibility-heavy setups, map the same host workspace to a rea
 
 The public defaults avoid duplicate mounts by making `/root/workspace` and `/root/repos` real directories. The OpenCode web project picker starts directory searches from `path.home` (`/root`), and its finder can skip symlinked workspace roots.
 
+## Plain OpenCode Mode
+
+Set `OPENCODE_PLUS_ENHANCEMENT_MODE=false` to run only the OpenCode server process. In this mode:
+
+- `sshd` exits cleanly and does not listen on port `22`.
+- The Cloudflare Access gateway is unavailable, even if its supervisor config exists.
+- `/config/persist/root` is not copied into `/root`.
+- Compatibility symlinks such as `/root/aiplayground` and `/root/gitrepos` are not created.
+- The OpenCode project database is not modified to enforce `project.global.worktree`.
+
+Use this mode when you want the image's packaged OpenCode binary and tooling but not the runtime session/persistence/gateway enhancements.
+
 ## Persistent Root State
 
 At startup, the entrypoint copies `/config/persist/root/` into `/root/` with `rsync`. Use this for durable CLI/auth/editor state such as:
@@ -50,7 +63,7 @@ The current OpenCode session/auth state should live in `/config/persist/root/.lo
 
 ## Cloudflare Access Gateway
 
-The bundled gateway binary is `/usr/local/bin/opencode-cf-auth-proxy`. The gateway is disabled by default. Set `OPENCODE_CF_AUTH_ENABLED=true` to generate `/config/persist/opencode-cf-auth-proxy.env` from Docker environment variables and start the supervisor program.
+The bundled gateway binary is `/usr/local/bin/opencode-cf-auth-proxy`. The gateway is disabled by default. Set `OPENCODE_CF_AUTH_ENABLED=true` to generate `/config/persist/opencode-cf-auth-proxy.env` from Docker environment variables and start the supervisor program. This requires `OPENCODE_PLUS_ENHANCEMENT_MODE=true`.
 
 Generated gateway config is written to:
 

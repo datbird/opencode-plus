@@ -8,6 +8,7 @@ OpenCode Plus is intended to preserve AI working context across image rebuilds a
 - Live containers should use one canonical Docker workspace variable, preferably a real path under `/root`, such as `OPENCODE_WORKSPACE_DIR=/root/workspace` and `OPENCODE_REPOS_DIR=/root/repos`.
 - `/root/aiplayground` and `/root/gitrepos` may be real bind mounts in migrated installs. The entrypoint should only create symlinks there when those paths are not already real directories.
 - OpenCode state is copied from `/config/persist/root` into `/root` during startup unless those state paths are direct mounts.
+- `OPENCODE_PLUS_ENHANCEMENT_MODE=false` disables runtime Plus behavior and leaves only the plain OpenCode server process running.
 
 The web `Open project` dialog starts searches from `path.home` (`/root`). If the useful workspace is only reachable through a symlink under `/root`, directory discovery may look empty. For new installs, prefer a real workspace directory directly under `/root`, such as `/root/workspace`.
 
@@ -17,6 +18,7 @@ The web `Open project` dialog starts searches from `path.home` (`/root`). If the
 - Directly bind-mounting OpenCode state paths such as `/root/.local/share/opencode`, `/root/.config/opencode`, and `/root/.cache/opencode` avoids stale one-way startup copies across rebuilds.
 - The entrypoint excludes directly mounted OpenCode state paths from startup rsync to avoid self-copy loops and stale state revival.
 - `opencode-server-wrapper` repeatedly enforces `project.global.worktree=$OPENCODE_WORKSPACE_DIR` during startup because OpenCode can reset the global worktree to `/` after initial server initialization.
+- Plain mode skips sshd, Cloudflare gateway, state restore, compatibility symlinks, and worktree enforcement.
 
 Verification commands:
 

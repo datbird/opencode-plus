@@ -6,6 +6,8 @@ OpenCode Plus is designed to run cleanly as an Unraid Docker container while pre
 
 Use `datbird/opencode-plus:dev` for the default Unraid install. Use `:base` for a smaller server and `:full` only when image/PDF/chart/OCR tools are required.
 
+Set `OPENCODE_PLUS_ENHANCEMENT_MODE=false` if you want the container to behave like a plain OpenCode server without the SSH daemon, Cloudflare gateway, startup state restore, or compatibility path helpers.
+
 ## Suggested Paths
 
 - Appdata: `/mnt/user/appdata/opencode-plus:/config`
@@ -71,7 +73,7 @@ This keeps auth, sessions, model metadata, memories, and tool output durable acr
 
 ## Cloudflare Access
 
-Cloudflare Access is disabled by default. To enable it, add the gateway port mapping, set `OPENCODE_CF_AUTH_ENABLED=true`, and provide the gateway environment variables documented in `docs/CONFIGURATION.md`.
+Cloudflare Access is disabled by default. To enable it, add the gateway port mapping, set `OPENCODE_CF_AUTH_ENABLED=true`, keep `OPENCODE_PLUS_ENHANCEMENT_MODE=true`, and provide the gateway environment variables documented in `docs/CONFIGURATION.md`.
 
 The entrypoint writes generated gateway config to:
 

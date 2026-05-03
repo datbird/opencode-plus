@@ -7,35 +7,46 @@ export LOGNAME=root
 export PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
 export OPENCODE_REPOS_DIR="${OPENCODE_REPOS_DIR:-/root/repos}"
+export OPENCODE_PLUS_ENHANCEMENT_MODE="${OPENCODE_PLUS_ENHANCEMENT_MODE:-true}"
 export OPENCODE_CF_AUTH_ENABLED="${OPENCODE_CF_AUTH_ENABLED:-false}"
 
-mkdir -p /config/persist/root /config/logs "$OPENCODE_WORKSPACE_DIR" "$OPENCODE_REPOS_DIR" /root/.ssh /run/sshd /var/log/supervisor
+mkdir -p /config/logs "$OPENCODE_WORKSPACE_DIR" "$OPENCODE_REPOS_DIR" /var/log/supervisor
 
-if [[ ! -d /root/aiplayground || -L /root/aiplayground ]]; then
-  ln -sfn "$OPENCODE_WORKSPACE_DIR" /root/aiplayground
+case "${OPENCODE_PLUS_ENHANCEMENT_MODE}" in
+  true|TRUE|1|yes|YES) export OPENCODE_PLUS_ENHANCEMENT_MODE=true ;;
+  false|FALSE|0|no|NO|"") export OPENCODE_PLUS_ENHANCEMENT_MODE=false ;;
+  *) echo "OPENCODE_PLUS_ENHANCEMENT_MODE must be true or false" >&2; exit 1 ;;
+esac
+
+if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" ]]; then
+  mkdir -p /config/persist/root /root/.ssh /run/sshd
+
+  if [[ ! -d /root/aiplayground || -L /root/aiplayground ]]; then
+    ln -sfn "$OPENCODE_WORKSPACE_DIR" /root/aiplayground
+  fi
+  if [[ ! -d /root/gitrepos || -L /root/gitrepos ]]; then
+    ln -sfn "$OPENCODE_REPOS_DIR" /root/gitrepos
+  fi
+  ln -sfn /opt/dropbox /root/.dropbox-dist
+
+  if [[ -d /config/persist/root ]]; then
+    rsync_excludes=()
+    for mounted_state_path in \
+      .local/share/opencode \
+      .config/opencode \
+      .cache/opencode; do
+      if awk -v mount_point="/root/${mounted_state_path}" '$5 == mount_point { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+        rsync_excludes+=(--exclude="${mounted_state_path}/**")
+      fi
+    done
+    rsync -a "${rsync_excludes[@]}" /config/persist/root/ /root/ || true
+  fi
+
+  chmod 700 /root/.ssh 2>/dev/null || true
+  chmod 600 /root/.ssh/* 2>/dev/null || true
 fi
-if [[ ! -d /root/gitrepos || -L /root/gitrepos ]]; then
-  ln -sfn "$OPENCODE_REPOS_DIR" /root/gitrepos
-fi
-ln -sfn /opt/dropbox /root/.dropbox-dist
 
-if [[ -d /config/persist/root ]]; then
-  rsync_excludes=()
-  for mounted_state_path in \
-    .local/share/opencode \
-    .config/opencode \
-    .cache/opencode; do
-    if awk -v mount_point="/root/${mounted_state_path}" '$5 == mount_point { found = 1 } END { exit !found }' /proc/self/mountinfo; then
-      rsync_excludes+=(--exclude="${mounted_state_path}/**")
-    fi
-  done
-  rsync -a "${rsync_excludes[@]}" /config/persist/root/ /root/ || true
-fi
-
-chmod 700 /root/.ssh 2>/dev/null || true
-chmod 600 /root/.ssh/* 2>/dev/null || true
-
-if [[ -n "${ROOT_PASSWORD:-}" ]]; then
+if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" && -n "${ROOT_PASSWORD:-}" ]]; then
   printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd
 fi
 
@@ -77,11 +88,20 @@ write_gateway_env() {
 }
 
 case "${OPENCODE_CF_AUTH_ENABLED}" in
-  true|TRUE|1|yes|YES) export OPENCODE_CF_AUTH_ENABLED=true; write_gateway_env ;;
+  true|TRUE|1|yes|YES)
+    if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" != "true" ]]; then
+      echo "OPENCODE_CF_AUTH_ENABLED=true requires OPENCODE_PLUS_ENHANCEMENT_MODE=true" >&2
+      exit 1
+    fi
+    export OPENCODE_CF_AUTH_ENABLED=true
+    write_gateway_env
+    ;;
   false|FALSE|0|no|NO|"") export OPENCODE_CF_AUTH_ENABLED=false ;;
   *) echo "OPENCODE_CF_AUTH_ENABLED must be true or false" >&2; exit 1 ;;
 esac
 
-ssh-keygen -A >/dev/null 2>&1 || true
+if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" ]]; then
+  ssh-keygen -A >/dev/null 2>&1 || true
+fi
 
 exec "$@"

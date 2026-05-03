@@ -75,14 +75,14 @@ docker push ghcr.io/datbird/opencode-plus:full
 docker push ghcr.io/datbird/opencode-plus:latest
 ```
 
-Before publishing, decide whether `latest` should remain `dev` and whether the gateway enhancement mode API is stable enough for public docs.
+Before publishing, decide whether `latest` should remain `dev`.
 
 ## Enhancement Mode Direction
 
-The planned Go gateway/sidecar should keep Cloudflare Access behavior working as it does now, then add feature-gated enhancements behind an explicit enable/disable toggle. Recommended environment variable:
+Runtime Plus behavior is feature-gated behind:
 
 ```text
 OPENCODE_PLUS_ENHANCEMENT_MODE=false
 ```
 
-Keep the default conservative until the enhancement mode is documented and tested.
+The default remains `true` for existing OpenCode Plus deployments. Set it to `false` to smoke-test plain OpenCode mode.

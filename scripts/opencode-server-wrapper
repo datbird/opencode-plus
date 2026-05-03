@@ -9,6 +9,7 @@ export OPENCODE_SERVER_HOSTNAME="${OPENCODE_SERVER_HOSTNAME:-0.0.0.0}"
 export OPENCODE_SERVER_PORT="${OPENCODE_SERVER_PORT:-4096}"
 export OPENCODE_LOG_LEVEL="${OPENCODE_LOG_LEVEL:-INFO}"
 export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
+export OPENCODE_PLUS_ENHANCEMENT_MODE="${OPENCODE_PLUS_ENHANCEMENT_MODE:-true}"
 
 mkdir -p "$OPENCODE_WORKSPACE_DIR"
 cd "$OPENCODE_WORKSPACE_DIR"
@@ -18,15 +19,19 @@ export PWD
 opencode serve --hostname "$OPENCODE_SERVER_HOSTNAME" --port "$OPENCODE_SERVER_PORT" --print-logs --log-level "$OPENCODE_LOG_LEVEL" &
 opencode_pid="$!"
 
-(
-  db_path="/root/.local/share/opencode/opencode.db"
-  escaped_workspace="${OPENCODE_WORKSPACE_DIR//\'/\'\'}"
-  for _ in {1..180}; do
-    if [[ -f "$db_path" ]] && sqlite3 "$db_path" "select 1 from project where id = 'global' limit 1;" >/dev/null 2>&1; then
-      sqlite3 "$db_path" "update project set worktree = '${escaped_workspace}', time_updated = strftime('%s', 'now') * 1000 where id = 'global' and worktree != '${escaped_workspace}'; pragma wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
-    fi
-    sleep 2
-  done
-) &
+case "${OPENCODE_PLUS_ENHANCEMENT_MODE}" in
+  true|TRUE|1|yes|YES)
+    (
+      db_path="/root/.local/share/opencode/opencode.db"
+      escaped_workspace="${OPENCODE_WORKSPACE_DIR//\'/\'\'}"
+      for _ in {1..180}; do
+        if [[ -f "$db_path" ]] && sqlite3 "$db_path" "select 1 from project where id = 'global' limit 1;" >/dev/null 2>&1; then
+          sqlite3 "$db_path" "update project set worktree = '${escaped_workspace}', time_updated = strftime('%s', 'now') * 1000 where id = 'global' and worktree != '${escaped_workspace}'; pragma wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+        fi
+        sleep 2
+      done
+    ) &
+    ;;
+esac
 
 wait "$opencode_pid"

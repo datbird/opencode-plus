@@ -4,6 +4,8 @@ Unofficial enhanced OpenCode server images for Docker and Unraid.
 
 OpenCode Plus packages OpenCode Server with a durable Ubuntu-based remote development environment, an optional Cloudflare Access aware gateway, SSH access, persistent workspace mounts, and three image sizes for different use cases.
 
+OpenCode Plus runtime enhancements are enabled by default. Set `OPENCODE_PLUS_ENHANCEMENT_MODE=false` to run only a plain `opencode serve` process without the SSH daemon, Cloudflare gateway, compatibility symlinks, startup root-state restore, or OpenCode DB worktree enforcement.
+
 OpenCode Plus is not affiliated with or endorsed by the upstream OpenCode project.
 
 Documentation:
@@ -55,6 +57,8 @@ docker run -d \
 ```
 
 The Cloudflare Access gateway is disabled by default. To enable it, set `OPENCODE_CF_AUTH_ENABLED=true` and provide the required `CF_ACCESS_*`, `ALLOWED_EMAILS`, and upstream basic-auth environment variables. When enabled, expose the gateway port instead of exposing OpenCode directly. The gateway health endpoint is `GET /__health`.
+
+`OPENCODE_CF_AUTH_ENABLED=true` requires `OPENCODE_PLUS_ENHANCEMENT_MODE=true`.
 
 Build examples:
 
