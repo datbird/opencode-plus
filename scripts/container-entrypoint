@@ -19,7 +19,16 @@ fi
 ln -sfn /opt/dropbox /root/.dropbox-dist
 
 if [[ -d /config/persist/root ]]; then
-  rsync -a /config/persist/root/ /root/ || true
+  rsync_excludes=()
+  for mounted_state_path in \
+    .local/share/opencode \
+    .config/opencode \
+    .cache/opencode; do
+    if awk -v mount_point="/root/${mounted_state_path}" '$5 == mount_point { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+      rsync_excludes+=(--exclude="${mounted_state_path}/**")
+    fi
+  done
+  rsync -a "${rsync_excludes[@]}" /config/persist/root/ /root/ || true
 fi
 
 chmod 700 /root/.ssh 2>/dev/null || true

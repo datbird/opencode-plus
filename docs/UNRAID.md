@@ -16,7 +16,7 @@ Use `datbird/opencode-plus:dev` for the default Unraid install. Use `:base` for 
 Current migrated containers:
 
 - `opencode1`: `172.25.1.8`, WebUI `http://172.25.1.8:4097/`.
-- `opencode2`: `172.25.1.24`, WebUI `http://172.25.1.24:4097/`.
+- `opencode2`: `172.25.1.9`, WebUI `http://172.25.1.9:4097/`.
 - `opencode1` was previously named `opencode-ubuntu`; use `opencode1` in Docker and Unraid references going forward.
 
 The entrypoint creates:
@@ -53,7 +53,7 @@ docker run -d \
   datbird/opencode-plus:dev
 ```
 
-For Robert's migrated `opencode2` container, preserve the existing session database path by keeping `OPENCODE_WORKSPACE_DIR=/data/aiplayground`, `OPENCODE_REPOS_DIR=/data/gitrepos`, and the matching bind mounts to both `/data/...` and `/root/aiplayground` or `/root/gitrepos`.
+For Robert's migrated `opencode2` container, use `OPENCODE_WORKSPACE_DIR=/root/aiplayground` and `OPENCODE_REPOS_DIR=/root/gitrepos` as the canonical environment variables. Keep matching bind mounts at both `/root/...` and `/data/...` only when compatibility with older session rows or tooling is needed.
 
 ## Unraid Labels
 

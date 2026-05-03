@@ -5,7 +5,7 @@ OpenCode Plus is intended to preserve AI working context across image rebuilds a
 ## Durable Workspace Paths
 
 - Public-image defaults should be generic, not Robert-specific. Preferred defaults are `OPENCODE_WORKSPACE_DIR=/root/workspace` and `OPENCODE_REPOS_DIR=/root/repos`.
-- Robert's current migrated `opencode2` uses `/data/aiplayground` for session DB compatibility and also mounts the same host workspace at `/root/aiplayground` for web picker discovery.
+- Robert's live `opencode2` uses `OPENCODE_WORKSPACE_DIR=/root/aiplayground` and `OPENCODE_REPOS_DIR=/root/gitrepos` as the canonical Docker environment variables, with the same host workspace also mounted at `/data/aiplayground` only as a compatibility mirror.
 - `/root/aiplayground` and `/root/gitrepos` may be real bind mounts. The entrypoint should only create symlinks there when those paths are not already real directories.
 - OpenCode state is copied from `/config/persist/root` into `/root` during startup.
 
@@ -14,14 +14,17 @@ The web `Open project` dialog starts searches from `path.home` (`/root`). If the
 ## Current Live Containers
 
 - `opencode1`: primary OpenCode Plus container on Docker network `br0` with static IP `172.25.1.8`.
-- `opencode2`: secondary/fallback OpenCode Plus container on Docker network `br0` with static IP `172.25.1.24`.
+- `opencode2`: secondary/fallback OpenCode Plus container on Docker network `br0` with static IP `172.25.1.9`.
 - Both containers serve through the bundled Cloudflare Access bridge on port `4097`.
-- Cloudflare Tunnel `req` routes `opencode.crossmojonation.net` to `http://172.25.1.8:4097` and `opencode2.crossmojonation.net` to `http://172.25.1.24:4097` as of tunnel configuration version `14`.
+- Cloudflare Tunnel `req` routes `opencode.crossmojonation.net` to `http://172.25.1.8:4097` and `opencode2.crossmojonation.net` to `http://172.25.1.9:4097` as of tunnel configuration version `15`.
 - `opencode1` was formerly named `opencode-ubuntu`; use `opencode1` for live Docker commands going forward.
 - Both live containers should have real bind mounts for `/root/aiplayground` and `/root/gitrepos`, not only symlinks, so the web Open project picker lists `~/aiplayground` contents.
-- Both live bridge env files should include `OPENCODE_ROOT_REDIRECT_PATH=/L2RhdGEvYWlwbGF5Z3JvdW5k/session`; otherwise authenticated visits to `/` can open the global `/` project and the picker will show `//`.
+- Both live bridge env files should include `OPENCODE_ROOT_REDIRECT_PATH=/L3Jvb3QvYWlwbGF5Z3JvdW5k/session`; otherwise authenticated visits to `/` can open the global `/` project and the picker will show `//`.
 - As of 2026-05-03, `opencode1` and `opencode2` both run image ID `sha256:700cdd2e2919e0d8832610e3f967980b62b6ff067d3da32fc3fa3751abe1531a`.
-- `opencode1` directly bind-mounts `/mnt/user/appdata/opencode-ubuntu/persist/root/.local/share/opencode`, `.config/opencode`, and `.cache/opencode` into `/root/...`. This was added because the older one-way startup copy from `/config/persist/root` could revive archived sessions after restart.
+- `opencode1` directly bind-mounts `/mnt/user/appdata/opencode-ubuntu/persist/root/.local/share/opencode`, `.config/opencode`, and `.cache/opencode` into `/root/...`. `opencode2` should mirror this pattern from `/mnt/user/appdata/opencode2/persist/root/...`. This avoids the older one-way startup copy from `/config/persist/root` reviving stale session state after restart.
+- As of 2026-05-03, live `opencode2` was restarted with direct OpenCode state mounts and an entrypoint override to avoid the current image's blocking self-rsync. Source `container-entrypoint` now excludes directly mounted OpenCode state paths from startup rsync; rebuild/redeploy before removing the live override.
+- Source `opencode-server-wrapper` now repeatedly enforces `project.global.worktree=$OPENCODE_WORKSPACE_DIR` during startup because OpenCode can reset the global worktree to `/` after initial server initialization. Live `opencode2` restart-tested successfully with `OPENCODE_WORKSPACE_DIR=/root/aiplayground`, process cwd `/root/aiplayground`, DB worktree `/root/aiplayground`, and expected session archive state preserved.
+- `opencode1` still needs the same canonical workspace cleanup applied from a different running session. Do not restart/recreate `opencode1` from inside an `opencode1` chat. Observed live state before handoff: direct OpenCode state mounts are present, but Docker env/process cwd/bridge redirect still point to `/data/aiplayground` and DB `project.global.worktree` can reset to `/`.
 - Zombie sessions `Session persistence after Docker migration` and `Kansas City weather today` were archived in the persistent `opencode1` DB on 2026-05-03 and verified to stay archived after restart.
 
 Verification commands:

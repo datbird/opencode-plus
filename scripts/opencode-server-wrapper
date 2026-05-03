@@ -13,4 +13,19 @@ export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
 mkdir -p "$OPENCODE_WORKSPACE_DIR"
 cd "$OPENCODE_WORKSPACE_DIR"
 export PWD="$(pwd -P)"
-exec opencode serve --hostname "$OPENCODE_SERVER_HOSTNAME" --port "$OPENCODE_SERVER_PORT" --print-logs --log-level "$OPENCODE_LOG_LEVEL"
+
+opencode serve --hostname "$OPENCODE_SERVER_HOSTNAME" --port "$OPENCODE_SERVER_PORT" --print-logs --log-level "$OPENCODE_LOG_LEVEL" &
+opencode_pid="$!"
+
+(
+  db_path="/root/.local/share/opencode/opencode.db"
+  escaped_workspace="${OPENCODE_WORKSPACE_DIR//\'/\'\'}"
+  for _ in {1..180}; do
+    if [[ -f "$db_path" ]] && sqlite3 "$db_path" "select 1 from project where id = 'global' limit 1;" >/dev/null 2>&1; then
+      sqlite3 "$db_path" "update project set worktree = '${escaped_workspace}', time_updated = strftime('%s', 'now') * 1000 where id = 'global' and worktree != '${escaped_workspace}'; pragma wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    fi
+    sleep 2
+  done
+) &
+
+wait "$opencode_pid"
