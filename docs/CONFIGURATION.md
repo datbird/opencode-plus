@@ -1,11 +1,13 @@
 # Configuration
 
-OpenCode Plus is configured through Docker environment variables, persistent files under `/config`, and mounted workspace data under `/data`.
+OpenCode Plus is configured through Docker environment variables, persistent files under `/config`, and mounted workspace data.
 
 ## Runtime Mounts
 
 - `/config`: persistent container state, logs, copied root home files, and gateway config.
-- `/data`: workspace data. The entrypoint creates `/root/aiplayground -> /data/aiplayground` and `/root/gitrepos -> /data/gitrepos`.
+- `/root/workspace`: default workspace directory where `opencode serve` starts.
+- `/root/repos`: default directory for local Git clones.
+- `/data`: optional workspace data mount for Unraid or custom layouts.
 - `/var/run/docker.sock`: optional host Docker socket for Docker-aware agents and devcontainer workflows.
 
 ## Core Environment Variables
@@ -17,6 +19,22 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_SERVER_PORT`: OpenCode upstream port. Defaults to `4096`.
 - `OPENCODE_LOG_LEVEL`: OpenCode log level. Defaults to `INFO`.
 - `TZ`: container timezone.
+
+## Workspace Environment Variables
+
+- `OPENCODE_WORKSPACE_DIR`: directory where `opencode serve` starts. Defaults to `/root/workspace`.
+- `OPENCODE_REPOS_DIR`: directory for local Git clones. Defaults to `/root/repos`.
+
+At startup, the entrypoint creates both configured directories and, when no real `/root` mount exists, symlinks:
+
+```text
+/root/aiplayground -> $OPENCODE_WORKSPACE_DIR
+/root/gitrepos -> $OPENCODE_REPOS_DIR
+```
+
+For Robert's migrated Unraid setup, map host `/mnt/user/appdata/aiplayground` to both `/data/aiplayground` and `/root/aiplayground`, then keep `OPENCODE_WORKSPACE_DIR=/data/aiplayground`. Do the same for repos with `/mnt/user/gitrepos` mapped to both `/data/gitrepos` and `/root/gitrepos`.
+
+The public defaults avoid duplicate mounts by making `/root/workspace` and `/root/repos` real directories. The OpenCode web project picker starts directory searches from `path.home` (`/root`), and its finder can skip symlinked workspace roots.
 
 ## Persistent Root State
 

@@ -5,11 +5,17 @@ export HOME=/root
 export USER=root
 export LOGNAME=root
 export PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
+export OPENCODE_WORKSPACE_DIR="${OPENCODE_WORKSPACE_DIR:-/root/workspace}"
+export OPENCODE_REPOS_DIR="${OPENCODE_REPOS_DIR:-/root/repos}"
 
-mkdir -p /config/persist/root /config/logs /data/aiplayground /data/gitrepos /root/.ssh /run/sshd /var/log/supervisor
+mkdir -p /config/persist/root /config/logs "$OPENCODE_WORKSPACE_DIR" "$OPENCODE_REPOS_DIR" /root/.ssh /run/sshd /var/log/supervisor
 
-ln -sfn /data/aiplayground /root/aiplayground
-ln -sfn /data/gitrepos /root/gitrepos
+if [[ ! -d /root/aiplayground || -L /root/aiplayground ]]; then
+  ln -sfn "$OPENCODE_WORKSPACE_DIR" /root/aiplayground
+fi
+if [[ ! -d /root/gitrepos || -L /root/gitrepos ]]; then
+  ln -sfn "$OPENCODE_REPOS_DIR" /root/gitrepos
+fi
 ln -sfn /opt/dropbox /root/.dropbox-dist
 
 if [[ -d /config/persist/root ]]; then

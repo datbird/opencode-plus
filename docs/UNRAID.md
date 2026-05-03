@@ -9,13 +9,22 @@ Use `datbird/opencode-plus:dev` for the default Unraid install. Use `:base` for 
 ## Suggested Paths
 
 - Appdata: `/mnt/user/appdata/opencode-plus:/config`
-- Workspace: `/mnt/user:/data`
+- Workspace: map the desired host workspace to `/root/workspace` for new installs.
+- Repos: optionally map a separate host repo path to `/root/repos`.
 - Docker socket: `/var/run/docker.sock:/var/run/docker.sock`
+
+Current migrated containers:
+
+- `opencode1`: `172.25.1.8`, WebUI `http://172.25.1.8:4097/`.
+- `opencode2`: `172.25.1.24`, WebUI `http://172.25.1.24:4097/`.
+- `opencode1` was previously named `opencode-ubuntu`; use `opencode1` in Docker and Unraid references going forward.
 
 The entrypoint creates:
 
-- `/root/aiplayground -> /data/aiplayground`
-- `/root/gitrepos -> /data/gitrepos`
+- `/root/workspace` from `OPENCODE_WORKSPACE_DIR` by default.
+- `/root/repos` from `OPENCODE_REPOS_DIR` by default.
+- `/root/aiplayground -> $OPENCODE_WORKSPACE_DIR` when `/root/aiplayground` is not already a real mounted directory.
+- `/root/gitrepos -> $OPENCODE_REPOS_DIR` when `/root/gitrepos` is not already a real mounted directory.
 
 ## Ports
 
@@ -32,7 +41,8 @@ docker run -d \
   -p 4097:4097 \
   -p 2222:22 \
   -v /mnt/user/appdata/opencode-plus:/config:rw \
-  -v /mnt/user:/data:rw \
+  -v /mnt/user/appdata/opencode-workspace:/root/workspace:rw \
+  -v /mnt/user/gitrepos:/root/repos:rw \
   -v /var/run/docker.sock:/var/run/docker.sock:rw \
   -e TZ=America/Chicago \
   -e ROOT_PASSWORD='change-me' \
@@ -42,6 +52,8 @@ docker run -d \
   -e OPENCODE_SERVER_PORT=4096 \
   datbird/opencode-plus:dev
 ```
+
+For Robert's migrated `opencode2` container, preserve the existing session database path by keeping `OPENCODE_WORKSPACE_DIR=/data/aiplayground`, `OPENCODE_REPOS_DIR=/data/gitrepos`, and the matching bind mounts to both `/data/...` and `/root/aiplayground` or `/root/gitrepos`.
 
 ## Unraid Labels
 

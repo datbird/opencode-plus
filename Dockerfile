@@ -47,6 +47,8 @@ ENV HOME=/root \
     OPENCODE_SERVER_HOSTNAME=0.0.0.0 \
     OPENCODE_SERVER_PORT=4096 \
     OPENCODE_LOG_LEVEL=INFO \
+    OPENCODE_WORKSPACE_DIR=/root/workspace \
+    OPENCODE_REPOS_DIR=/root/repos \
     PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -114,7 +116,7 @@ RUN chmod 0755 /usr/local/bin/opencode-* /usr/local/bin/container-entrypoint /us
 
 VOLUME ["/config", "/data"]
 
-EXPOSE 22 4096
+EXPOSE 22 4096 4097
 
 ENTRYPOINT ["/usr/local/bin/container-entrypoint"]
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

@@ -25,8 +25,12 @@ Image variants:
 Runtime mounts:
 
 - `/config`: persistent app/config state.
-- `/data`: Unraid user share, with `/root/aiplayground -> /data/aiplayground` and `/root/gitrepos -> /data/gitrepos`.
+- `/root/workspace`: default workspace directory where `opencode serve` starts.
+- `/root/repos`: default directory for local Git clones.
+- `/data`: optional mount root for Unraid or custom layouts.
 - `/var/run/docker.sock`: host Docker socket when launched on Unraid.
+
+Workspace paths are configurable with `OPENCODE_WORKSPACE_DIR` and `OPENCODE_REPOS_DIR`. New installs should keep real workspace directories under `/root` so the OpenCode web project picker can discover them from `path.home`.
 
 This image is designed as a clean baseline for a durable OpenCode server. Live installs inside a running container can be tested, then promoted back into this Dockerfile.
 
@@ -41,7 +45,8 @@ docker run -d \
   -p 4096:4096 \
   -p 2222:22 \
   -v opencode-plus-config:/config \
-  -v /path/to/workspace:/data \
+  -v /path/to/workspace:/root/workspace \
+  -v /path/to/repos:/root/repos \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e ROOT_PASSWORD='change-me' \
   -e OPENCODE_SERVER_USERNAME='datbird' \
