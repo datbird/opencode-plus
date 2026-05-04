@@ -19,6 +19,8 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_SERVER_PORT`: OpenCode upstream port. Defaults to `4096`.
 - `OPENCODE_LOG_LEVEL`: OpenCode log level. Defaults to `INFO`.
 - `OPENCODE_PLUS_ENHANCEMENT_MODE`: enables OpenCode Plus runtime behavior. Defaults to `true`. Set to `false` for a plain OpenCode server.
+- `OPENCODE_PLUS_UI_ENABLED`: injects OpenCode Plus browser UI assets through the gateway when set to `true`. Defaults to `false`.
+- `OPENCODE_PLUS_UI_ASSET_DIR`: optional live asset directory for `drawer.js` and `drawer.css`, useful for testing UI changes without rebuilding the image.
 - `TZ`: container timezone.
 
 ## Workspace Environment Variables
@@ -86,6 +88,10 @@ Gateway environment variables:
 - `OPENCODE_BASIC_PASSWORD`: OpenCode Basic Auth password for upstream proxying. Defaults to `OPENCODE_SERVER_PASSWORD` when omitted.
 - `OPENCODE_BASIC_AUTH_B64`: alternative to username/password, base64 of `username:password`.
 - `OPENCODE_ROOT_REDIRECT_PATH`: optional root redirect path.
+- `OPENCODE_PLUS_AUTH_STATE_FILE`: optional runtime auth state file. Defaults to `/config/persist/opencode-plus-auth-state.json`.
+- `OPENCODE_PLUS_QUOTA_URL`: provider quota/status bridge URL used by `/__opencode-plus/quota`. Defaults to `http://127.0.0.1:18765/quota`.
+- `OPENCODE_PLUS_SECRETS_DIR`: encrypted OpenCode Plus provider credential vault directory. Defaults to `/config/persist/opencode-plus-secrets`.
+- `OPENCODE_PLUS_CONFIG_FILE`: non-secret OpenCode Plus runtime config file. Defaults to `/config/persist/opencode-plus-config.json`.
 
 When `OPENCODE_CF_AUTH_ENABLED=true`, startup requires `ALLOWED_EMAILS` plus either `CF_ACCESS_AUD` or `CF_ACCESS_SKIP_AUD=true`, and either `OPENCODE_BASIC_AUTH_B64` or upstream basic-auth user/password values.
 
@@ -96,6 +102,65 @@ GET /__health
 ```
 
 A healthy gateway normally reports `upstream_status:401` when OpenCode Basic Auth is enabled upstream. When the gateway is disabled, the supervisor program exits cleanly instead of entering `BACKOFF`.
+
+Runtime auth mode endpoint:
+
+```text
+GET /__opencode-plus/auth
+POST /__opencode-plus/auth
+```
+
+The injected drawer uses this endpoint for the `Cloudflare Auth` dropdown. Disabling Cloudflare Auth skips Access validation and upstream Basic Auth injection, so users see the local OpenCode login. The UI warns users to know the local username/password before continuing. Local OpenCode auth is never changed automatically by this toggle.
+
+Provider quota endpoint:
+
+```text
+GET /__opencode-plus/quota
+```
+
+The injected statusline sidecar fetches this same-origin endpoint. The gateway proxies it to `OPENCODE_PLUS_QUOTA_URL`, which should point at the local provider quota bridge.
+
+Provider credential vault endpoints:
+
+```text
+GET /__opencode-plus/secrets/status
+POST /__opencode-plus/secrets/key/generate
+POST /__opencode-plus/secrets/key/regenerate
+POST /__opencode-plus/secrets/provider/openrouter
+POST /__opencode-plus/secrets/provider/gemini
+```
+
+The drawer uses these endpoints to create an app-managed AES-256-GCM vault key and save provider credentials. The gateway stores the key and encrypted provider vault under `OPENCODE_PLUS_SECRETS_DIR` with `0600` files and returns only configured/not-configured status, never secret values. Credential save buttons remain disabled until the encryption key exists. Regenerating the key requires `confirm_wipe: true` and deletes the encrypted provider vault because existing vault credentials can no longer be decrypted.
+
+Runtime config endpoint:
+
+```text
+GET /__opencode-plus/config
+POST /__opencode-plus/config
+```
+
+The drawer uses this endpoint for non-secret preferences such as Gemini quota auth source. Supported Gemini auth sources are `auto`, `gemini_cli`, and `opencode_provider`. `auto` checks the encrypted vault, then Gemini CLI OAuth credentials, then compatible OpenCode OAuth provider entries.
+
+## OpenCode Plus UI Injection
+
+When both `OPENCODE_CF_AUTH_ENABLED=true` and `OPENCODE_PLUS_UI_ENABLED=true`, the gateway injects same-origin UI assets into OpenCode HTML responses:
+
+```text
+/__opencode-plus/drawer.css
+/__opencode-plus/drawer.js
+/__opencode-plus/statusline.css
+/__opencode-plus/statusline.js
+```
+
+The first injected feature is a top slide-down OpenCode Plus control drawer. It is intentionally separate from the composer/statusline enhancement CSS so the tuned statusline layout can remain stable while the drawer evolves.
+
+For live UI iteration, place editable assets in a persistent directory and set:
+
+```text
+OPENCODE_PLUS_UI_ASSET_DIR=/config/persist/opencode-plus-ui
+```
+
+Then edit `/config/persist/opencode-plus-ui/drawer.js` and `/config/persist/opencode-plus-ui/drawer.css`, refresh the browser, and avoid rebuilding the Docker image until the UI is ready to bake in.
 
 ## Optional Sync Services
 

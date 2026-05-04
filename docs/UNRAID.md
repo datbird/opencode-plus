@@ -82,3 +82,29 @@ The entrypoint writes generated gateway config to:
 ```
 
 Use `opencode-cf-auth-proxy.env.example` as a reference template. Route Cloudflare Tunnel or a reverse proxy to port `4097` when using the gateway.
+
+## Live UI Testing
+
+The OpenCode Plus UI drawer can be tested without rebuilding the Docker image after the updated gateway binary is installed.
+
+Use a persistent asset directory such as:
+
+```text
+/mnt/user/appdata/opencode-plus/persist/opencode-plus-ui
+```
+
+Map or create it inside the container as:
+
+```text
+/config/persist/opencode-plus-ui
+```
+
+Set these environment variables on the container:
+
+```text
+OPENCODE_CF_AUTH_ENABLED=true
+OPENCODE_PLUS_UI_ENABLED=true
+OPENCODE_PLUS_UI_ASSET_DIR=/config/persist/opencode-plus-ui
+```
+
+Then edit `drawer.js` and `drawer.css` in that directory and refresh the browser. Rebuild the image only after the drawer behavior and styling are ready to bake into the embedded gateway assets.

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Kimi Moonshot">
+  <defs>
+    <linearGradient id="ms" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#c4b5fd"/>
+      <stop offset=".48" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="25" fill="url(#ms)"/>
+  <path fill="#fff" fill-opacity=".9" d="M42.5 15.5a21 21 0 1 0 6 36.2A24 24 0 0 1 28.2 16c4.7-2.1 9.7-2.1 14.3-.5Z"/>
+  <circle cx="42" cy="24" r="3" fill="#fff" fill-opacity=".88"/>
+</svg>

@@ -67,6 +67,10 @@ https://github.com/datbird/opencode-plus
 
 The local source directory name may be historical; the public project name is OpenCode Plus.
 
+The gateway/proxy source is part of this repository under `bridge/opencode-cf-auth-proxy/`. The compiled proxy binary should be produced by Docker or local `go build` from that source; do not treat an external loose checkout or copied binary as canonical.
+
+The quota bridge source is part of this repository under `bridge/opencode-plus-quota/`. If live testing edits `/root/aiplayground/opencode-enhancement-suite-bridge/`, copy accepted changes back into `bridge/opencode-plus-quota/` before building or committing.
+
 ## Publishing Auth
 
 Use your own registry credentials or CI secrets when publishing. Do not store tokens in Git remotes, global Git config, Docker image layers, or public docs.

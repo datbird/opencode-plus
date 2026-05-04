@@ -35,6 +35,46 @@ docker build --target dev -t datbird/opencode-plus:dev -t datbird/opencode-plus:
 docker build --target full -t datbird/opencode-plus:full .
 ```
 
+## Gateway Source
+
+The OpenCode Plus gateway source lives in:
+
+```text
+bridge/opencode-cf-auth-proxy/
+```
+
+This includes the Cloudflare Access bridge, `/__opencode-plus/*` endpoints, HTML UI injection, and embedded drawer assets. Docker builds compile this Go source in an `auth-proxy-builder` stage; do not edit or vendor a standalone proxy binary as the source of truth.
+
+Run gateway checks locally with:
+
+```bash
+cd bridge/opencode-cf-auth-proxy
+go test ./...
+node --check ui/drawer.js
+```
+
+## Quota Bridge Source
+
+The provider quota/status bridge lives in:
+
+```text
+bridge/opencode-plus-quota/
+```
+
+It serves `GET /health` and `GET /quota` on port `18765` by default. The gateway proxies `/__opencode-plus/quota` to this bridge through `OPENCODE_PLUS_QUOTA_URL`.
+
+Run syntax checks with:
+
+```bash
+node --check bridge/opencode-plus-quota/server.mjs
+```
+
+OpenAI usage is collected natively from OpenCode OAuth state in `~/.local/share/opencode/auth.json` and `https://chatgpt.com/backend-api/wham/usage`. OpenRouter and Gemini are native collectors. Claude still uses `@slkiser/opencode-quota` for now.
+
+For live UI iteration, set `OPENCODE_PLUS_UI_ASSET_DIR` to a writable persistent directory and edit `drawer.js` / `drawer.css` there. Once the UI is approved, copy those files back into `bridge/opencode-cf-auth-proxy/ui/` so the next image build embeds them.
+
+The statusline layout is locked. Read `docs/STATUSLINE-LAYOUT-LOCK.md` before changing `bridge/opencode-cf-auth-proxy/ui/statusline.css`, chip DOM structure, row detection, transforms, margins, or wrap reserve constants.
+
 ## Current Size Expectations
 
 Approximate local image sizes from the first multi-variant build:

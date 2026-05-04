@@ -1,3 +1,10 @@
+FROM golang:1.22-bookworm AS auth-proxy-builder
+
+WORKDIR /src
+COPY bridge/opencode-cf-auth-proxy/ ./
+RUN go test ./... \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/opencode-cf-auth-proxy .
+
 FROM ubuntu:24.04 AS ubuntu-base
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -97,10 +104,12 @@ RUN curl -fsSL https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/N -H "A
     && rm -rf /tmp/op /tmp/op.zip /tmp/op-version
 
 COPY scripts/ /usr/local/bin/
-COPY bin/opencode-cf-auth-proxy /usr/local/bin/opencode-cf-auth-proxy
+COPY bridge/opencode-plus-quota/ /opt/opencode-plus-quota/
+COPY --from=auth-proxy-builder /out/opencode-cf-auth-proxy /usr/local/bin/opencode-cf-auth-proxy
 COPY supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY supervisor/opencode.conf /etc/supervisor/conf.d/opencode.conf
 COPY supervisor/opencode-cf-auth-proxy.conf /etc/supervisor/conf.d/opencode-cf-auth-proxy.conf
+COPY supervisor/opencode-plus-quota.conf /etc/supervisor/conf.d/opencode-plus-quota.conf
 
 RUN chmod 0755 /usr/local/bin/opencode-* /usr/local/bin/container-entrypoint /usr/local/bin/opencode-cf-auth-proxy \
     && mkdir -p /config /data /root/.ssh /run/sshd /var/log/supervisor \

@@ -15,6 +15,8 @@ Documentation:
 - [Development and Publishing](docs/DEVELOPMENT.md)
 - [Session and Memory Handoff](docs/SESSION-HANDOFF.md)
 
+The Cloudflare Access/OpenCode Plus UI gateway source is consolidated in this repo under `bridge/opencode-cf-auth-proxy/`. Docker builds compile the gateway from that source and embed the default drawer assets, while live deployments can still override drawer assets with `OPENCODE_PLUS_UI_ASSET_DIR` for fast iteration. Provider quota/status collection lives under `bridge/opencode-plus-quota/`.
+
 Image variants:
 
 | Tag | Target | Intended Use |
