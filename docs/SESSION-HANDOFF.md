@@ -74,3 +74,5 @@ The quota bridge source is part of this repository under `bridge/opencode-plus-q
 ## Publishing Auth
 
 Use your own registry credentials or CI secrets when publishing. Do not store tokens in Git remotes, global Git config, Docker image layers, or public docs.
+
+For Robert's live `datbird/opencode-plus` repo pushes from the Unraid/OpenCode environment, use the private workspace/project docs as the source of truth. Current live procedure: renew 1Password through `mymcp`, retrieve the `GitHub PAT Token (Unraid)` item from the `Private` vault, and pass it through a one-shot Git credential helper for `git push`. If `mymcp` cannot renew because local encrypted state is missing, restore `/root/.mymcp` and `/root/.config/op/config` from the live OpenCode Plus persistent state before asking Robert for manual auth. Never commit credentials or bypass GitHub push protection.
