@@ -178,6 +178,7 @@ Why they exist:
 - Non-large stack chips need margin compensation when sharing rows with large-chip geometry.
 - Chevron, first-row small chips, later-row small chips, and three-row wraps each have locked type/class transforms.
 - Row 3+ needs its own lift so infinite wrapping remains visually aligned.
+- Mobile Safari must use the same type/class transform cascade as desktop. The previous `@media (max-width: 640px)` chevron override with `translateY(-2px)` made Safari bypass the locked math and caused the chevron/statusline rows to sit too low.
 
 Do not add provider/module exceptions here. If a future chip breaks these rules, classify its visual shape correctly or adjust the class-level rule for all elements of that class.
 

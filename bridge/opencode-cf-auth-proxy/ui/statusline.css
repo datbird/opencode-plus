@@ -361,17 +361,6 @@
   z-index: 2;
 }
 
-@media (max-width: 640px) {
-  .oc-webui-sidecar-control-row .oc-webui-sidecar-native-chevron {
-    flex-basis: 28px !important;
-    height: 34px !important;
-    margin-right: 0 !important;
-    min-height: 34px !important;
-    transform: translateY(-2px) !important;
-    width: 28px !important;
-  }
-}
-
 .oc-webui-sidecar-control-row.oc-webui-sidecar-control-row--wrapped .oc-sidecar-type-chevron {
   transform: translateY(-4px) !important;
 }
