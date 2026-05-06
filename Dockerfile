@@ -107,6 +107,7 @@ RUN curl -fsSL https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/N -H "A
 
 COPY scripts/ /usr/local/bin/
 COPY bridge/opencode-plus-quota/ /opt/opencode-plus-quota/
+COPY bridge/opencode-cf-auth-proxy/ui/ /opt/opencode-plus-ui/
 COPY --from=auth-proxy-builder /out/opencode-cf-auth-proxy /usr/local/bin/opencode-cf-auth-proxy
 COPY supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY supervisor/opencode.conf /etc/supervisor/conf.d/opencode.conf
@@ -217,17 +218,20 @@ RUN curl -fsSL https://get.helm.sh/helm-v3.19.4-linux-amd64.tar.gz -o /tmp/helm.
     && GOBIN=/usr/local/bin go install github.com/go-delve/delve/cmd/dlv@latest \
     && rm -rf /tmp/helm.tar.gz /tmp/linux-amd64 /tmp/helix.tar.xz /tmp/lazygit /tmp/lazygit.tar.gz /tmp/bin /tmp/editorconfig-checker.tar.gz /root/go
 
+RUN npx --yes npm@latest install -g npm@latest \
+    && npm install -g corepack@latest \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
+    && npm cache clean --force
+
 RUN npm install -g \
     @devcontainers/cli \
     @google/gemini-cli \
     @tailwindcss/language-server \
     bash-language-server \
-    corepack \
     dockerfile-language-server-nodejs \
     eslint \
     firebase-tools \
-    npm \
-    pnpm \
     prettier \
     pyright \
     typescript \
