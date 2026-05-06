@@ -6,6 +6,19 @@
   const SPACER_ATTR = "data-oc-sidecar-spacer";
   const UPDATE_INTERVAL_MS = 1_000;
   const STORAGE_KEY = "opencodePlusDrawerSettings";
+  const DEBUG_STORAGE_KEY = "opencodePlusStatuslineDebug";
+  const TYPE_CHEVRON = "oc-sidecar-type-chevron";
+  const TYPE_DROPDOWN = "oc-sidecar-type-dropdown";
+  const TYPE_SMALL_CHIP = "oc-sidecar-type-small-chip";
+  const TYPE_LARGE_CHIP = "oc-sidecar-type-large-chip";
+  const COMPOSER_CONTROL_SELECTOR = [
+    "[data-component='prompt-agent-control']",
+    "[data-action='prompt-agent']",
+    "[data-component='prompt-model-control']",
+    "[data-component='prompt-variant-control']",
+    "[data-action='prompt-model-variant']",
+    ".oc-webui-sidecar-control-row",
+  ].join(", ");
   const DEFAULT_QUOTA_URL = "/__opencode-plus/quota";
   const WRAPPED_BASE_RESERVE_PX = 72;
   const WRAPPED_EXTRA_ROW_RESERVE_PX = 38;
@@ -27,6 +40,26 @@
   let lastAnchoredAt = 0;
 
   console.info("[OpenCode Enhancement Suite] content script loaded", location.href);
+
+  function debugStatusline(event, details = {}) {
+    if (localStorage.getItem(DEBUG_STORAGE_KEY) !== "true") return;
+    const row = findEffortDropdown()?.closest?.(".oc-webui-sidecar-control-row") || document.querySelector(".oc-webui-sidecar-control-row");
+    const sidecar = document.getElementById(SIDECAR_ID);
+    const chevron = row?.querySelector?.(`.${TYPE_CHEVRON}`);
+    const rowRect = row?.getBoundingClientRect?.();
+    const sidecarRect = sidecar?.getBoundingClientRect?.();
+    const chevronRect = chevron?.getBoundingClientRect?.();
+    const payload = {
+      collapsed: Boolean(settings.nativeControlsCollapsed),
+      rowClasses: row?.className || null,
+      visualRows: row?.dataset?.ocSidecarVisualRows || null,
+      row: rowRect ? { top: Math.round(rowRect.top), height: Math.round(rowRect.height), bottom: Math.round(rowRect.bottom) } : null,
+      sidecar: sidecarRect ? { top: Math.round(sidecarRect.top), height: Math.round(sidecarRect.height), bottom: Math.round(sidecarRect.bottom), parent: sidecar.parentElement?.className || sidecar.parentElement?.tagName } : null,
+      chevron: chevronRect ? { top: Math.round(chevronRect.top), height: Math.round(chevronRect.height), bottom: Math.round(chevronRect.bottom), previous: chevron.previousElementSibling?.className || chevron.previousElementSibling?.tagName, next: chevron.nextElementSibling?.id || chevron.nextElementSibling?.className || chevron.nextElementSibling?.tagName } : null,
+      ...details,
+    };
+    console.info("[OpenCode Plus statusline]", event, JSON.stringify(payload));
+  }
 
   function storageGet() {
     if (!isExtensionRuntime || !browserApi?.storage?.local) {
@@ -214,7 +247,9 @@
   }
 
   function decorateControlRow(anchor) {
-    document.querySelectorAll(".oc-webui-sidecar-native-chevron").forEach((element) => element.remove());
+    document.querySelectorAll(`.${TYPE_CHEVRON}`).forEach((element) => {
+      if (!findControlRow(anchor)?.contains(element)) element.remove();
+    });
     document.querySelectorAll("[data-oc-sidecar-native-control]").forEach((element) => {
       element.removeAttribute("data-oc-sidecar-native-control");
     });
@@ -239,7 +274,7 @@
 
   function markNativeControl(root) {
     if (!root) return;
-    root.classList.add("oc-webui-sidecar-native-chip");
+    root.classList.add("oc-webui-sidecar-native-chip", TYPE_DROPDOWN);
     root.dataset.ocSidecarNativeControl = "true";
   }
 
@@ -271,14 +306,11 @@
     const effortRoot = controls.effortRoot || row.querySelector("[data-component='prompt-variant-control']") || row.querySelector("button[data-action='prompt-model-variant']")?.closest("[data-component='prompt-variant-control']");
     if (!modeRoot || !modelRoot || !effortRoot) return;
 
-    const nativeCenter = firstFiniteNumber([modeRoot, modelRoot, effortRoot].map((element) => visibleCenterY(element)));
-    if (Number.isFinite(nativeCenter)) row.style.setProperty("--oc-sidecar-native-row-center-y", String(nativeCenter));
-
     row.classList.toggle("oc-webui-sidecar-control-row--native-collapsed", Boolean(settings.nativeControlsCollapsed));
 
-    const chevron = document.createElement("button");
+    const chevron = row.querySelector(`.${TYPE_CHEVRON}`) || document.createElement("button");
     chevron.type = "button";
-    chevron.className = `oc-webui-sidecar-native-chevron ${settings.nativeControlsCollapsed ? "oc-webui-sidecar-native-chevron--collapsed" : "oc-webui-sidecar-native-chevron--expanded"}`;
+    chevron.className = `oc-webui-sidecar-native-chevron ${TYPE_CHEVRON} ${settings.nativeControlsCollapsed ? "oc-webui-sidecar-native-chevron--collapsed" : "oc-webui-sidecar-native-chevron--expanded"}`;
     chevron.setAttribute("aria-label", "Toggle built-in OpenCode settings");
     chevron.setAttribute("aria-pressed", String(Boolean(settings.nativeControlsCollapsed)));
     const chevronTooltip = [
@@ -288,26 +320,32 @@
     ].join("\n");
     chevron.title = chevronTooltip;
     chevron.dataset.ocSidecarTooltip = chevronTooltip;
-    const chevronGlyph = document.createElement("span");
-    chevronGlyph.className = "oc-webui-sidecar-native-chevron__glyph";
-    chevron.append(chevronGlyph);
-    chevron.addEventListener("mouseenter", () => showNativeChevronTooltip(chevron, chevronTooltip));
-    chevron.addEventListener("mouseleave", hideNativeChevronTooltip);
-    chevron.addEventListener("focus", () => showNativeChevronTooltip(chevron, chevronTooltip));
-    chevron.addEventListener("blur", hideNativeChevronTooltip);
-    chevron.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      hideNativeChevronTooltip();
-      settings.nativeControlsCollapsed = !settings.nativeControlsCollapsed;
-      row.classList.toggle("oc-webui-sidecar-control-row--native-collapsed", Boolean(settings.nativeControlsCollapsed));
-      saveSettings();
-      scheduleMount(0);
-    }, true);
-    chevron.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    }, true);
+    if (!chevron.querySelector(".oc-webui-sidecar-native-chevron__glyph")) {
+      const chevronGlyph = document.createElement("span");
+      chevronGlyph.className = "oc-webui-sidecar-native-chevron__glyph";
+      chevron.replaceChildren(chevronGlyph);
+    }
+    if (chevron.dataset.ocSidecarHandlers !== "true") {
+      chevron.dataset.ocSidecarHandlers = "true";
+      chevron.addEventListener("mouseenter", () => showNativeChevronTooltip(chevron, chevron.dataset.ocSidecarTooltip));
+      chevron.addEventListener("mouseleave", hideNativeChevronTooltip);
+      chevron.addEventListener("focus", () => showNativeChevronTooltip(chevron, chevron.dataset.ocSidecarTooltip));
+      chevron.addEventListener("blur", hideNativeChevronTooltip);
+      chevron.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        hideNativeChevronTooltip();
+        settings.nativeControlsCollapsed = !settings.nativeControlsCollapsed;
+        row.classList.toggle("oc-webui-sidecar-control-row--native-collapsed", Boolean(settings.nativeControlsCollapsed));
+        debugStatusline("collapse-toggle", { immediate: true });
+        saveSettings();
+        scheduleMount(0);
+      }, true);
+      chevron.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+    }
 
     const firstNative = [modeRoot, modelRoot, effortRoot]
       .map((element) => Array.from(row.children).find((child) => child === element || child.contains(element)))
@@ -319,7 +357,7 @@
       .forEach((element) => {
         element.dataset.ocSidecarNativeControl = "true";
       });
-    if (firstNative?.parentElement === row) firstNative.before(chevron);
+    if (firstNative?.parentElement === row && firstNative.previousElementSibling !== chevron) firstNative.before(chevron);
   }
 
   function decorateModelDropdown(anchor) {
@@ -376,7 +414,10 @@
     const isNativeCollapsed = row.classList.contains("oc-webui-sidecar-control-row--native-collapsed");
     const chevron = row.querySelector(".oc-webui-sidecar-native-chevron");
     chevron?.style.removeProperty("transform");
-    const elements = Array.from(row.querySelectorAll(isNativeCollapsed ? ".oc-webui-sidecar__chip" : ".oc-webui-sidecar-native-chip, .oc-webui-sidecar__chip"))
+    row.classList.remove("oc-webui-sidecar-control-row--wrapped");
+    row.style.removeProperty("--oc-sidecar-wrap-reserve");
+    delete row.dataset.ocSidecarVisualRows;
+    const elements = Array.from(row.querySelectorAll(isNativeCollapsed ? `.${TYPE_CHEVRON}, .oc-webui-sidecar__chip` : `.${TYPE_CHEVRON}, .oc-webui-sidecar-native-chip, .oc-webui-sidecar__chip`))
       .filter(isVisible);
     elements.forEach((element) => {
       element.classList.remove("oc-webui-sidecar__chip--row-has-tall");
@@ -390,15 +431,16 @@
       return;
     }
     const items = elements.map((element) => ({ element, rect: element.getBoundingClientRect() }));
-    const firstTop = Math.min(...items.map(({ rect }) => rect.top));
-    const isWrapped = items.some(({ rect }) => rect.top - firstTop > 8);
+    const firstCenter = Math.min(...items.map(({ rect }) => rect.top + rect.height / 2));
+    const isWrapped = items.some(({ rect }) => (rect.top + rect.height / 2) - firstCenter > 18);
     row.classList.toggle("oc-webui-sidecar-control-row--wrapped", isWrapped);
 
     const visualRows = [];
-    for (const item of items.sort((a, b) => a.rect.top - b.rect.top)) {
-      let visualRow = visualRows.find((candidate) => Math.abs(candidate.top - item.rect.top) <= 8);
+    for (const item of items.sort((a, b) => (a.rect.top + a.rect.height / 2) - (b.rect.top + b.rect.height / 2))) {
+      const center = item.rect.top + item.rect.height / 2;
+      let visualRow = visualRows.find((candidate) => Math.abs(candidate.center - center) <= 18);
       if (!visualRow) {
-        visualRow = { top: item.rect.top, items: [] };
+        visualRow = { top: item.rect.top, center, items: [] };
         visualRows.push(visualRow);
       }
       visualRow.items.push(item.element);
@@ -411,14 +453,13 @@
       if (index >= 2) {
         visualRow.items.forEach((element) => element.classList.add("oc-webui-sidecar__chip--visual-row-after-2"));
       }
-      if (visualRow.items.some((element) => element.dataset.module === "gemini")) {
+      if (visualRow.items.some((element) => element.classList.contains(TYPE_LARGE_CHIP))) {
         visualRow.items.forEach((element) => element.classList.add("oc-webui-sidecar__chip--row-has-tall"));
       }
       if (!row.classList.contains("oc-webui-sidecar-control-row--native-collapsed") && visualRow.items.some((element) => element.classList.contains("oc-webui-sidecar-native-chip"))) {
         visualRow.items.forEach((element) => element.classList.add("oc-webui-sidecar__chip--row-has-native"));
       }
     });
-    alignChevronToFirstRowCenter(row, chevron, visualRows);
     if (isWrapped) {
       const reserve = WRAPPED_BASE_RESERVE_PX + Math.max(0, visualRows.length - 2) * WRAPPED_EXTRA_ROW_RESERVE_PX;
       row.style.setProperty("--oc-sidecar-wrap-reserve", `${isNativeCollapsed ? Math.max(reserve, WRAPPED_BASE_RESERVE_PX) : reserve}px`);
@@ -427,56 +468,25 @@
       row.style.removeProperty("--oc-sidecar-wrap-reserve");
       delete row.dataset.ocSidecarVisualRows;
     }
-  }
-
-  function alignChevronToFirstRowCenter(row, chevron, visualRows) {
-    if (!chevron || !isVisible(chevron) || visualRows.length === 0) return;
-    const lockedNativeCenter = Number(row.style.getPropertyValue("--oc-sidecar-native-row-center-y"));
-    const targetCenter = Number.isFinite(lockedNativeCenter) ? lockedNativeCenter : firstVisualRowCenter(row, chevron, visualRows);
-    if (!Number.isFinite(targetCenter)) return;
-    const chevronRect = chevron.getBoundingClientRect();
-    const chevronCenter = chevronRect.top + chevronRect.height / 2;
-    const currentTranslateY = translateYFromComputedTransform(getComputedStyle(chevron).transform);
-    const nextTranslateY = Math.round((currentTranslateY + targetCenter - chevronCenter) * 10) / 10;
-    chevron.style.setProperty("transform", `translateY(${nextTranslateY}px)`, "important");
-  }
-
-  function firstVisualRowCenter(row, chevron, visualRows) {
-    const firstRowItems = visualRows[0].items.filter((element) => element !== chevron && isVisible(element));
-    const nativeTargets = firstRowItems.filter((element) => element.matches(".oc-webui-sidecar-native-chip, [data-oc-sidecar-native-control='true']"));
-    const targets = nativeTargets.length > 0 ? nativeTargets : firstRowItems;
-    if (targets.length === 0) return NaN;
-    return targets
-      .map((element) => {
+    debugStatusline("wrap-state", {
+      isWrapped,
+      rowCount: visualRows.length,
+      rowTops: visualRows.map((visualRow) => Math.round(visualRow.top)),
+      rows: visualRows.map((visualRow) => visualRow.items.map((element) => {
         const rect = element.getBoundingClientRect();
-        return rect.top + rect.height / 2;
-      })
-      .reduce((sum, value) => sum + value, 0) / targets.length;
-  }
-
-  function visibleCenterY(element) {
-    if (!element || !isVisible(element)) return NaN;
-    const rect = element.getBoundingClientRect();
-    return rect.top + rect.height / 2;
-  }
-
-  function firstFiniteNumber(values) {
-    return values.find((value) => Number.isFinite(value));
-  }
-
-  function translateYFromComputedTransform(transform) {
-    if (!transform || transform === "none") return 0;
-    const matrix3d = transform.match(/^matrix3d\((.+)\)$/);
-    if (matrix3d) {
-      const values = matrix3d[1].split(",").map((value) => Number(value.trim()));
-      return Number.isFinite(values[13]) ? values[13] : 0;
-    }
-    const matrix = transform.match(/^matrix\((.+)\)$/);
-    if (matrix) {
-      const values = matrix[1].split(",").map((value) => Number(value.trim()));
-      return Number.isFinite(values[5]) ? values[5] : 0;
-    }
-    return 0;
+        return {
+          className: element.className || null,
+          id: element.id || null,
+          tag: element.tagName,
+          module: element.dataset?.module || null,
+          type: Array.from(element.classList || []).find((className) => className.startsWith("oc-sidecar-type-")) || null,
+          top: Math.round(rect.top),
+          center: Math.round(rect.top + rect.height / 2),
+          height: Math.round(rect.height),
+          transform: getComputedStyle(element).transform,
+        };
+      })),
+    });
   }
 
   function reserveSidecarRow(anchor, sidecar) {
@@ -598,7 +608,8 @@
     handle.textContent = "⋮";
 
     const providerData = getProvider(config.providerId);
-    const valueData = config.showValues === false ? [] : providerData?.values || [];
+    const providerUnavailable = providerData?.status && providerData.status !== "ok";
+    const valueData = config.showValues === false || providerUnavailable ? [] : providerData?.values || [];
     const tooltipParts = [
       providerTooltipLabel(config, providerData),
       providerData?.values?.map((item) => `${item.label}: ${item.value}`).join("\n"),
@@ -629,27 +640,40 @@
     const statusData = getProviderStatusData(config.providerId);
     if (quotaState.status === "loading") {
       if (config.layout === "stack") {
-        metrics.append(...placeholderStackRows(config, "loading"));
+        const rows = placeholderStackRows(config, "loading");
+        metrics.append(...rows);
+        classifyChipByRenderedShape(chip, rows.length);
       } else {
         metrics.textContent = "loading";
+        classifyChipByRenderedShape(chip, 1);
       }
     } else if (statusData.length === 0 && valueData.length === 0) {
       if (config.layout === "stack") {
         const placeholder = quotaState.status === "error" ? "retrying" : providerData?.status === "not_configured" ? "not set" : "no data";
-        metrics.append(...placeholderStackRows(config, placeholder));
+        const rows = placeholderStackRows(config, placeholder);
+        metrics.append(...rows);
+        classifyChipByRenderedShape(chip, rows.length);
       } else {
         metrics.textContent = quotaState.status === "error" ? "retrying" : providerData?.status === "not_configured" ? "not set" : "no data";
+        classifyChipByRenderedShape(chip, 1);
       }
     } else if (config.layout === "stack") {
       metrics.append(...statusData.map((item) => makeStackBar(displayLabel(config, item.label), item.value, item.title)));
       metrics.append(...valueData.map((item) => makeValue(displayLabel(config, item.label), item.value, item.resetsIn ? `resets in ${item.resetsIn}` : undefined)));
+      classifyChipByRenderedShape(chip, statusData.length + valueData.length);
     } else {
       metrics.append(...statusData.map((item) => makeMetric(item.label, item.value, item.title)));
       metrics.append(...valueData.map((item) => makeValue(item.label, item.value, item.resetsIn ? `resets in ${item.resetsIn}` : undefined)));
+      classifyChipByRenderedShape(chip, statusData.length + valueData.length);
     }
 
     chip.append(handle, provider, metrics);
     return chip;
+  }
+
+  function classifyChipByRenderedShape(chip, rowCount) {
+    chip.classList.remove(TYPE_SMALL_CHIP, TYPE_LARGE_CHIP);
+    chip.classList.add(rowCount >= 3 ? TYPE_LARGE_CHIP : TYPE_SMALL_CHIP);
   }
 
   function placeholderStackRows(config, text) {
@@ -835,6 +859,7 @@
   }
 
   function mount() {
+    debugStatusline("mount-start");
     if (!/opencode|127\.0\.0\.1|localhost/i.test(location.href)) return;
 
     if (quotaState.status === "loading" && Date.now() - lastQuotaFetch > 1_500) {
@@ -864,6 +889,7 @@
       sidecar.style.maxWidth = "";
       sidecar.style.transform = "";
       lastAnchoredAt = Date.now();
+      debugStatusline("mount-anchored", { anchor: anchor?.outerHTML?.slice?.(0, 180) || null });
       publishPageStatus();
       return;
     }
@@ -871,6 +897,7 @@
     if (sidecar && !sidecar.hidden && Date.now() - lastAnchoredAt < ANCHOR_MISS_GRACE_MS) {
       scheduleMount(180);
       scheduleMount(520);
+      debugStatusline("anchor-miss-grace");
       publishPageStatus();
       return;
     }
@@ -899,10 +926,12 @@
     sidecar.style.maxWidth = "";
     sidecar.style.transform = "";
     publishPageStatus();
+    debugStatusline("mount-hidden");
   }
 
   function scheduleMount(delay = 80) {
     if (mountTimers.has(delay)) return;
+    debugStatusline("schedule-mount", { delay });
     const timer = window.setTimeout(() => {
       mountTimers.delete(delay);
       mount();
@@ -913,12 +942,40 @@
   function mutationOnlyTouchesSidecar(mutation) {
     const nodes = [...mutation.addedNodes, ...mutation.removedNodes]
       .filter((node) => node.nodeType === Node.ELEMENT_NODE);
-    return nodes.length > 0 && nodes.every((node) => node.id === SIDECAR_ID || node.querySelector?.(`#${SIDECAR_ID}`));
+    return nodes.length > 0 && nodes.every((node) => isOpenCodePlusOwnedNode(node) || isHoverOverlayNode(node));
+  }
+
+  function isOpenCodePlusOwnedNode(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (node.id === SIDECAR_ID || node.id === "opencode-plus-drawer" || node.id === "oc-webui-sidecar-native-tooltip") return true;
+    if (node.closest?.(`#${SIDECAR_ID}, #opencode-plus-drawer, #oc-webui-sidecar-native-tooltip`)) return true;
+    if (Array.from(node.classList || []).some((className) => className.startsWith("oc-webui-sidecar") || className.startsWith("ocp-"))) return true;
+    return Boolean(node.querySelector?.(`#${SIDECAR_ID}, #opencode-plus-drawer, #oc-webui-sidecar-native-tooltip, [class^="oc-webui-sidecar"], [class*=" oc-webui-sidecar"], [class^="ocp-"], [class*=" ocp-"]`));
+  }
+
+  function isHoverOverlayNode(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (node.matches?.("[role='tooltip'], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-floating-ui-root]")) return true;
+    if (node.closest?.("[role='tooltip'], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-floating-ui-root]")) return true;
+    return Boolean(node.querySelector?.("[role='tooltip'], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-floating-ui-root]"));
+  }
+
+  function mutationTouchesComposerControls(mutation) {
+    return [...mutation.addedNodes, ...mutation.removedNodes]
+      .filter((node) => node.nodeType === Node.ELEMENT_NODE)
+      .some((node) => node.matches?.(COMPOSER_CONTROL_SELECTOR) || node.querySelector?.(COMPOSER_CONTROL_SELECTOR));
   }
 
   function watchComposerDom() {
     const observer = new MutationObserver((mutations) => {
       if (mutations.every(mutationOnlyTouchesSidecar)) return;
+      if (!mutations.some(mutationTouchesComposerControls)) return;
+      debugStatusline("observer-composer-mutation", {
+        count: mutations.length,
+        targets: mutations.slice(0, 5).map((mutation) => mutation.target?.nodeType === Node.ELEMENT_NODE ? mutation.target.className || mutation.target.id || mutation.target.tagName : mutation.target?.nodeName),
+        added: mutations.reduce((sum, mutation) => sum + mutation.addedNodes.length, 0),
+        removed: mutations.reduce((sum, mutation) => sum + mutation.removedNodes.length, 0),
+      });
       if (!document.getElementById(SIDECAR_ID) && !findEffortDropdown()) return;
       scheduleMount();
     });

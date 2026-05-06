@@ -7,6 +7,7 @@
   const STALE_THINKING_QUIET_MS = 90 * 1000;
   const STALE_THINKING_CHECK_MS = 15 * 1000;
   const STALE_THINKING_SNOOZE_MS = 10 * 60 * 1000;
+  const RECOVERY_NOTICE_KEY_PREFIX = "opencodePlusRecoveryNoticeDismissed";
   const DEFAULT_SETTINGS = {
     open: false,
     handleXPercent: 72,
@@ -60,7 +61,7 @@
 
   function isOwnUiNode(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false;
-    return Boolean(node.closest?.("#opencode-plus-drawer, #oc-webui-sidecar, .ocp-stale-thinking"));
+    return Boolean(node.closest?.("#opencode-plus-drawer, #oc-webui-sidecar, .ocp-stale-thinking, .ocp-recovery-notice"));
   }
 
   function pageLooksLikeThinking() {
@@ -93,11 +94,75 @@
     document.documentElement.append(notice);
   }
 
+  function currentSessionId() {
+    return location.pathname.match(/\/session\/(ses_[^/?#]+)/)?.[1] || "";
+  }
+
+  async function fetchLatestSessionMessage(sessionId) {
+    if (!sessionId) return null;
+    const response = await fetch(`/session/${encodeURIComponent(sessionId)}/message`, { cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null);
+    const messages = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : Array.isArray(body?.messages) ? body.messages : [];
+    return messages
+      .map((message) => message?.data && typeof message.data === "object" ? { id: message.id || message.data.id, ...message.data } : message)
+      .filter(Boolean)
+      .sort((a, b) => Number(a?.time?.created || a?.time_created || 0) - Number(b?.time?.created || b?.time_created || 0))
+      .at(-1) || null;
+  }
+
+  function recoveryErrorFromMessage(message) {
+    if (message?.role !== "assistant") return "";
+    const error = message.error || message.data?.error;
+    return String(error?.data?.message || error?.message || error || "").trim();
+  }
+
+  function recoveryNoticeKey(message, error) {
+    const id = message?.id || message?.time?.created || Date.now();
+    return `${RECOVERY_NOTICE_KEY_PREFIX}:${id}:${error.slice(0, 80)}`;
+  }
+
+  function showRecoveryNotice(message, error) {
+    if (!error || document.querySelector(".ocp-recovery-notice")) return;
+    const key = recoveryNoticeKey(message, error);
+    if (sessionStorage.getItem(key) === "dismissed") return;
+
+    const notice = document.createElement("aside");
+    notice.className = "ocp-stale-thinking ocp-recovery-notice";
+    notice.setAttribute("role", "status");
+    notice.innerHTML = `
+      <div class="ocp-stale-thinking__copy">
+        <strong>Latest request failed</strong>
+        <span>${escapeHtml(shorten(error, 180))}</span>
+      </div>
+      <div class="ocp-stale-thinking__actions">
+        <button type="button" class="ocp-stale-thinking__button ocp-stale-thinking__button--primary">Refresh</button>
+        <button type="button" class="ocp-stale-thinking__button">Dismiss</button>
+      </div>
+    `;
+    notice.querySelector(".ocp-stale-thinking__button--primary")?.addEventListener("click", () => window.location.reload());
+    notice.querySelector(".ocp-stale-thinking__button:not(.ocp-stale-thinking__button--primary)")?.addEventListener("click", () => {
+      sessionStorage.setItem(key, "dismissed");
+      notice.remove();
+    });
+    document.documentElement.append(notice);
+  }
+
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
+  }
+
+  function shorten(value, maxLength) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+  }
+
   function installStaleThinkingWatchdog() {
     if (window.__opencodePlusStaleThinkingWatchdogInstalled) return;
     window.__opencodePlusStaleThinkingWatchdogInstalled = true;
     let thinkingSince = 0;
     let lastAppMutation = Date.now();
+    let lastRecoveryCheck = 0;
 
     const observer = new MutationObserver((mutations) => {
       if (mutations.every((mutation) => {
@@ -111,6 +176,13 @@
     window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       const now = Date.now();
+      if (now - lastRecoveryCheck >= STALE_THINKING_CHECK_MS) {
+        lastRecoveryCheck = now;
+        fetchLatestSessionMessage(currentSessionId()).then((message) => {
+          const error = recoveryErrorFromMessage(message);
+          if (error) showRecoveryNotice(message, error);
+        }).catch(() => {});
+      }
       const looksLikeThinking = pageLooksLikeThinking();
       if (!looksLikeThinking) {
         thinkingSince = 0;

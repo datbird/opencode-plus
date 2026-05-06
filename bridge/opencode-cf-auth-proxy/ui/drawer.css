@@ -641,6 +641,20 @@
   color: rgba(255, 244, 214, 0.98);
 }
 
+.ocp-recovery-notice {
+  border-color: rgba(248, 113, 113, 0.38);
+}
+
+.ocp-recovery-notice .ocp-stale-thinking__copy strong {
+  color: rgba(254, 226, 226, 0.98);
+}
+
+.ocp-recovery-notice .ocp-stale-thinking__button--primary {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.38);
+  color: rgba(254, 226, 226, 0.98);
+}
+
 @keyframes ocp-drawer-spin {
   to {
     transform: rotate(360deg);

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { createDecipheriv } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -11,10 +11,12 @@ import { queryAnthropicQuota } from '/root/.cache/opencode/packages/@slkiser/ope
 const HOST = process.env.OPENCODE_SIDECAR_HOST || '0.0.0.0';
 const PORT = Number(process.env.OPENCODE_SIDECAR_PORT || 18765);
 const CACHE_MS = Number(process.env.OPENCODE_SIDECAR_CACHE_MS || 15000);
+const PROVIDER_FETCH_TIMEOUT_MS = Number(process.env.OPENCODE_SIDECAR_PROVIDER_TIMEOUT_MS || 12000);
 const GEMINI_OAUTH_CLIENT_ID = process.env.GEMINI_OAUTH_CLIENT_ID || '';
 const GEMINI_OAUTH_CLIENT_SECRET = process.env.GEMINI_OAUTH_CLIENT_SECRET || '';
 const GEMINI_CODE_ASSIST_URL = 'https://cloudcode-pa.googleapis.com/v1internal';
 const GEMINI_OAUTH_CREDS_PATH = process.env.GEMINI_OAUTH_CREDS_PATH || join(homedir(), '.gemini', 'oauth_creds.json');
+const GEMINI_CLI_BUNDLE_DIR = process.env.GEMINI_CLI_BUNDLE_DIR || '/usr/lib/node_modules/@google/gemini-cli/bundle';
 const OPENAI_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const OPENAI_ADMIN_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const OPENAI_AUTH_SOURCE_KEYS = ['openai', 'codex', 'chatgpt', 'opencode'];
@@ -34,6 +36,7 @@ const GEMINI_OPENCODE_AUTH_SOURCE_KEYS = ['gemini', 'google', 'google-gemini', '
 const XAI_MANAGEMENT_URL = 'https://management-api.x.ai';
 
 let cache = null;
+let geminiCliOAuthClientPromise = null;
 const execFileAsync = promisify(execFile);
 
 function sendJson(res, status, body) {
@@ -46,6 +49,16 @@ function sendJson(res, status, body) {
     'Content-Type': 'application/json; charset=utf-8',
   });
   res.end(payload);
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = PROVIDER_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: options.signal || controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function formatReset(resetTimeIso) {
@@ -184,7 +197,7 @@ async function getOpenAiChatGptProvider() {
     };
     if (resolvedAuth.accountId) headers['ChatGPT-Account-Id'] = resolvedAuth.accountId;
 
-    const response = await fetch(OPENAI_USAGE_URL, { headers });
+    const response = await fetchWithTimeout(OPENAI_USAGE_URL, { headers });
     const bodyText = await response.text();
     let body = {};
     try {
@@ -230,7 +243,7 @@ async function getOpenAiAdminProvider() {
   try {
     const end = Math.floor(Date.now() / 1000);
     const start = end - 7 * 24 * 60 * 60;
-    const response = await fetch(`${OPENAI_ADMIN_COSTS_URL}?start_time=${start}&end_time=${end}&bucket_width=1d&limit=31`, {
+    const response = await fetchWithTimeout(`${OPENAI_ADMIN_COSTS_URL}?start_time=${start}&end_time=${end}&bucket_width=1d&limit=31`, {
       headers: { Authorization: `Bearer ${key}` },
     });
     const body = await response.json().catch(() => ({}));
@@ -357,7 +370,7 @@ async function getOpenRouterProvider() {
   if (!key) return { id: 'openrouter', label: 'OpenRouter', status: 'not_configured', windows: [] };
 
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/credits', {
+    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/credits', {
       headers: { Authorization: `Bearer ${key}` },
     });
     const body = await response.json().catch(() => ({}));
@@ -425,7 +438,7 @@ async function getDeepSeekProvider() {
   if (!key) return { id: 'deepseek', label: 'DeepSeek', status: 'not_configured', windows: [], values: [{ label: 'Auth', value: 'not set' }] };
 
   try {
-    const response = await fetch('https://api.deepseek.com/user/balance', {
+    const response = await fetchWithTimeout('https://api.deepseek.com/user/balance', {
       headers: { Authorization: `Bearer ${key}` },
     });
     const body = await response.json().catch(() => ({}));
@@ -464,7 +477,7 @@ async function getSiliconFlowProvider() {
   if (!key) return { id: 'siliconflow', label: 'SiliconFlow', status: 'not_configured', windows: [], values: [{ label: 'Auth', value: 'not set' }] };
 
   try {
-    const response = await fetch('https://api.siliconflow.com/v1/user/info', {
+    const response = await fetchWithTimeout('https://api.siliconflow.com/v1/user/info', {
       headers: { Authorization: `Bearer ${key}` },
     });
     const body = await response.json().catch(() => ({}));
@@ -498,7 +511,7 @@ async function getMoonshotProvider() {
   if (!key) return { id: 'moonshot', label: 'Kimi/Moonshot', status: 'not_configured', windows: [], values: [{ label: 'Auth', value: 'not set' }] };
 
   try {
-    const response = await fetch('https://api.moonshot.ai/v1/users/me/balance', {
+    const response = await fetchWithTimeout('https://api.moonshot.ai/v1/users/me/balance', {
       headers: { Authorization: `Bearer ${key}` },
     });
     const body = await response.json().catch(() => ({}));
@@ -599,7 +612,7 @@ function accountIdFromFireworksName(name) {
 }
 
 async function fireworksApiJson(path, key) {
-  const response = await fetch(`https://api.fireworks.ai${path}`, {
+  const response = await fetchWithTimeout(`https://api.fireworks.ai${path}`, {
     headers: { Authorization: `Bearer ${key}` },
   });
   const body = await response.json().catch(() => ({}));
@@ -608,7 +621,7 @@ async function fireworksApiJson(path, key) {
 }
 
 async function xaiManagementJson(path, managementKey) {
-  const response = await fetch(`${XAI_MANAGEMENT_URL}${path}`, {
+  const response = await fetchWithTimeout(`${XAI_MANAGEMENT_URL}${path}`, {
     headers: { Authorization: `Bearer ${managementKey}` },
   });
   const body = await response.json().catch(() => ({}));
@@ -654,11 +667,12 @@ async function refreshGeminiAccessToken(creds, sourceName) {
     return creds.access_token;
   }
   if (!creds.refresh_token) throw new Error(`${sourceName} has no refresh token`);
-  const clientId = creds.client_id || creds.clientId || GEMINI_OAUTH_CLIENT_ID;
-  const clientSecret = creds.client_secret || creds.clientSecret || GEMINI_OAUTH_CLIENT_SECRET;
+  const bundledClient = await getGeminiCliOAuthClient();
+  const clientId = creds.client_id || creds.clientId || GEMINI_OAUTH_CLIENT_ID || bundledClient?.clientId;
+  const clientSecret = creds.client_secret || creds.clientSecret || GEMINI_OAUTH_CLIENT_SECRET || bundledClient?.clientSecret;
   if (!clientId || !clientSecret) throw new Error(`${sourceName} has no OAuth client credentials`);
 
-  const response = await fetch('https://oauth2.googleapis.com/token', {
+  const response = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -673,6 +687,27 @@ async function refreshGeminiAccessToken(creds, sourceName) {
     throw new Error(`Gemini token refresh failed: ${body.error_description || body.error || response.status}`);
   }
   return body.access_token;
+}
+
+async function getGeminiCliOAuthClient() {
+  if (!geminiCliOAuthClientPromise) geminiCliOAuthClientPromise = readGeminiCliOAuthClient().catch(() => null);
+  return geminiCliOAuthClientPromise;
+}
+
+async function readGeminiCliOAuthClient() {
+  const entries = await readdir(GEMINI_CLI_BUNDLE_DIR, { withFileTypes: true });
+  const chunkFiles = entries
+    .filter((entry) => entry.isFile() && /^chunk-[A-Z0-9]+\.js$/.test(entry.name))
+    .map((entry) => entry.name);
+
+  for (const fileName of chunkFiles) {
+    const source = await readFile(join(GEMINI_CLI_BUNDLE_DIR, fileName), 'utf8');
+    const clientId = source.match(/var\s+OAUTH_CLIENT_ID\s*=\s*(['"])([^'"]+)\1/)?.[2];
+    const clientSecret = source.match(/var\s+OAUTH_CLIENT_SECRET\s*=\s*(['"])([^'"]+)\1/)?.[2];
+    if (clientId && clientSecret) return { clientId, clientSecret };
+  }
+
+  return null;
 }
 
 function resolveGeminiOpenCodeOAuth(auth) {
@@ -731,7 +766,7 @@ function describeGeminiOpenCodeProvider(auth) {
 }
 
 async function postGeminiCodeAssist(method, token, body) {
-  const response = await fetch(`${GEMINI_CODE_ASSIST_URL}:${method}`, {
+  const response = await fetchWithTimeout(`${GEMINI_CODE_ASSIST_URL}:${method}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -884,7 +919,7 @@ async function getAnthropicAdminProvider() {
       ending_at: ending.toISOString(),
     });
     params.append('group_by[]', 'description');
-    const response = await fetch(`${ANTHROPIC_COST_URL}?${params}`, {
+    const response = await fetchWithTimeout(`${ANTHROPIC_COST_URL}?${params}`, {
       headers: { 'anthropic-version': '2023-06-01', 'x-api-key': key },
     });
     const body = await response.json().catch(() => ({}));
