@@ -220,9 +220,11 @@ RUN npm install -g \
     @google/gemini-cli \
     @tailwindcss/language-server \
     bash-language-server \
+    corepack \
     dockerfile-language-server-nodejs \
     eslint \
     firebase-tools \
+    npm \
     pnpm \
     prettier \
     pyright \
