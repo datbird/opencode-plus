@@ -81,6 +81,63 @@ func TestAuthStatePersistsCloudflareAuthToggle(t *testing.T) {
 	}
 }
 
+func TestIsPTYConnectRequest(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/pty/pty_123/connect-token", want: true},
+		{path: "/pty/pty_123/connect", want: true},
+		{path: "/pty/pty_123", want: false},
+		{path: "/pty", want: false},
+		{path: "/session/pty_123/connect", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isPTYConnectRequest(tt.path); got != tt.want {
+				t.Fatalf("isPTYConnectRequest(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareUpstreamRequestStripsPTYOriginHeadersOnlyForConnect(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/pty/pty_123/connect-token", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer user-token")
+	req.Header.Set("Cf-Access-Jwt-Assertion", "jwt")
+	req.Header.Set("Cf-Access-Authenticated-User-Email", "user@example.com")
+	req.Header.Set("Origin", "https://opencode2.crossmojonation.net")
+	req.Header.Set("Referer", "https://opencode2.crossmojonation.net/session")
+
+	prepareUpstreamRequest(req, config{BasicAuthValue: "Basic gateway-token"}, true)
+
+	for _, header := range []string{"Accept-Encoding", "Cf-Access-Jwt-Assertion", "Cf-Access-Authenticated-User-Email", "Origin", "Referer"} {
+		if got := req.Header.Get(header); got != "" {
+			t.Fatalf("%s header = %q, want empty", header, got)
+		}
+	}
+	if got := req.Header.Get("Authorization"); got != "Basic gateway-token" {
+		t.Fatalf("Authorization header = %q, want gateway basic auth", got)
+	}
+}
+
+func TestPrepareUpstreamRequestPreservesNormalOriginHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/pty", nil)
+	req.Header.Set("Origin", "https://opencode2.crossmojonation.net")
+	req.Header.Set("Referer", "https://opencode2.crossmojonation.net/session")
+
+	prepareUpstreamRequest(req, config{}, false)
+
+	if got := req.Header.Get("Origin"); got != "https://opencode2.crossmojonation.net" {
+		t.Fatalf("Origin header = %q, want preserved", got)
+	}
+	if got := req.Header.Get("Referer"); got != "https://opencode2.crossmojonation.net/session" {
+		t.Fatalf("Referer header = %q, want preserved", got)
+	}
+}
+
 func TestAuthHandlerUpdatesCloudflareAuthWithoutChangingLocalAuth(t *testing.T) {
 	state := &authState{cfAuthEnabled: false}
 	cfg := config{BasicAuthValue: "Basic dXNlcjpwYXNz"}

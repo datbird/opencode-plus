@@ -135,13 +135,7 @@ func main() {
 	proxy.Director = func(r *http.Request) {
 		originalDirector(r)
 		r.Host = upstream.Host
-		r.Header.Del("Accept-Encoding")
-		r.Header.Del("Authorization")
-		r.Header.Del("Cf-Access-Jwt-Assertion")
-		r.Header.Del("Cf-Access-Authenticated-User-Email")
-		if auth.cloudflareAuthEnabled() {
-			r.Header.Set("Authorization", cfg.BasicAuthValue)
-		}
+		prepareUpstreamRequest(r, cfg, auth.cloudflareAuthEnabled())
 	}
 	if cfg.UIEnabled {
 		proxy.ModifyResponse = injectUIAssets
@@ -173,7 +167,13 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
 	mux.HandleFunc("/__opencode-plus/quota", quotaHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/", uiAssetHandler(cfg))
+	mux.HandleFunc("/assets/", uiAssetOverrideHandler(cfg, proxy))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ghostty-vt.wasm") {
+			if serveUIAsset(w, r, cfg, "ghostty-vt.wasm") {
+				return
+			}
+		}
 		if auth.cloudflareAuthEnabled() {
 			email, err := validateAccessJWT(r.Context(), cfg, cache, r.Header.Get("Cf-Access-Jwt-Assertion"))
 			if err != nil {
@@ -209,6 +209,27 @@ func main() {
 	log.Printf("opencode-cf-auth-proxy listening on %s, upstream %s", cfg.ListenAddr, cfg.UpstreamURL)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
+	}
+}
+
+func isPTYConnectRequest(path string) bool {
+	return strings.HasPrefix(path, "/pty/") && (strings.HasSuffix(path, "/connect-token") || strings.HasSuffix(path, "/connect"))
+}
+
+func prepareUpstreamRequest(r *http.Request, cfg config, cloudflareAuthEnabled bool) {
+	r.Header.Del("Accept-Encoding")
+	r.Header.Del("Authorization")
+	r.Header.Del("Cf-Access-Jwt-Assertion")
+	r.Header.Del("Cf-Access-Authenticated-User-Email")
+	if isPTYConnectRequest(r.URL.Path) {
+		// The public gateway is same-origin to the browser, but the private
+		// upstream is 127.0.0.1. Avoid tripping OpenCode's origin check during
+		// the PTY ticket/WebSocket handoff.
+		r.Header.Del("Origin")
+		r.Header.Del("Referer")
+	}
+	if cloudflareAuthEnabled {
+		r.Header.Set("Authorization", cfg.BasicAuthValue)
 	}
 }
 
@@ -1102,6 +1123,41 @@ func quotaHandler(cfg config) http.HandlerFunc {
 	}
 }
 
+func uiAssetOverrideHandler(cfg config, proxy *httputil.ReverseProxy) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `\\`) {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		if !serveUIAsset(w, r, cfg, name) {
+			proxy.ServeHTTP(w, r)
+		}
+	}
+}
+
+func serveUIAsset(w http.ResponseWriter, r *http.Request, cfg config, name string) bool {
+	body, err := readUIAsset(cfg, name)
+	if err != nil {
+		return false
+	}
+	contentType := mime.TypeByExtension(filepath.Ext(name))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
+	return true
+}
+
 func uiAssetHandler(cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -1174,7 +1230,7 @@ func injectUIAssets(resp *http.Response) error {
 		resp.Header.Set("Content-Length", fmt.Sprint(len(html)))
 		return nil
 	}
-	injection := `<link rel="stylesheet" href="/__opencode-plus/statusline.css" data-opencode-plus-ui="statusline"><link rel="stylesheet" href="/__opencode-plus/drawer.css" data-opencode-plus-ui="drawer"><script defer src="/__opencode-plus/statusline.js" data-opencode-plus-ui="statusline"></script><script defer src="/__opencode-plus/drawer.js" data-opencode-plus-ui="drawer"></script>`
+	injection := `<script src="/__opencode-plus/terminal-rescue.js" data-opencode-plus-ui="terminal-rescue"></script><link rel="stylesheet" href="/__opencode-plus/statusline.css" data-opencode-plus-ui="statusline"><link rel="stylesheet" href="/__opencode-plus/drawer.css" data-opencode-plus-ui="drawer"><script defer src="/__opencode-plus/statusline.js" data-opencode-plus-ui="statusline"></script><script defer src="/__opencode-plus/drawer.js" data-opencode-plus-ui="drawer"></script>`
 	lower := strings.ToLower(html)
 	idx := strings.LastIndex(lower, "</head>")
 	if idx >= 0 {

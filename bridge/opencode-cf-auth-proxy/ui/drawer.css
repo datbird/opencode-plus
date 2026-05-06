@@ -140,6 +140,28 @@
   padding: 7px 12px;
 }
 
+.ocp-drawer__help {
+  align-items: center;
+  background: rgba(70, 199, 255, 0.11);
+  border: 1px solid rgba(70, 199, 255, 0.28);
+  border-radius: 999px;
+  color: rgba(224, 247, 255, 0.96);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 760;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  width: 32px;
+}
+
+.ocp-drawer__help:hover {
+  background: rgba(70, 199, 255, 0.18);
+  border-color: rgba(70, 199, 255, 0.48);
+}
+
 .ocp-drawer__grid {
   display: grid;
   gap: 12px;
@@ -529,6 +551,51 @@
 .ocp-drawer__modal-body {
   display: grid;
   gap: 10px;
+}
+
+.ocp-drawer__about {
+  display: grid;
+  gap: 12px;
+}
+
+.ocp-drawer__about-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.ocp-drawer__about-list div {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 13px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.ocp-drawer__about-list dt {
+  color: rgba(245, 245, 245, 0.68);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.ocp-drawer__about-list dd {
+  color: rgba(245, 245, 245, 0.92);
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.ocp-drawer__about-list a {
+  color: var(--ocp-drawer-accent-2);
+  text-decoration: none;
+}
+
+.ocp-drawer__about-list a:hover {
+  text-decoration: underline;
 }
 
 .ocp-drawer__restart-overlay {

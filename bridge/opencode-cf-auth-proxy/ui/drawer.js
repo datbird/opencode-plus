@@ -3,6 +3,9 @@
   window.__opencodePlusDrawerLoaded = true;
 
   const STORAGE_KEY = "opencodePlusDrawerSettings";
+  const OPENCODE_PLUS_VERSION = "local Docker build";
+  const OPENCODE_VERSION = "1.14.39";
+  const GITHUB_URL = "https://github.com/datbird/opencode-plus";
   const STALE_THINKING_VISIBLE_MS = 4 * 60 * 1000;
   const STALE_THINKING_QUIET_MS = 90 * 1000;
   const STALE_THINKING_CHECK_MS = 15 * 1000;
@@ -1000,6 +1003,35 @@
     modal.querySelector(".ocp-drawer__modal-close").focus();
   }
 
+  function openHelp(root) {
+    const modal = root.querySelector(".ocp-drawer__modal");
+    const title = modal.querySelector(".ocp-drawer__modal-title");
+    const body = modal.querySelector(".ocp-drawer__modal-body");
+    title.textContent = "OpenCode Plus Help";
+    body.innerHTML = `
+      <div class="ocp-drawer__about">
+        <p class="ocp-drawer__modal-intro">OpenCode Plus adds the fold-down controls, statusline provider usage chips, gateway controls, restart tools, and local quota integrations on top of OpenCode Server.</p>
+        <dl class="ocp-drawer__about-list">
+          <div>
+            <dt>OpenCode Plus</dt>
+            <dd>${escapeHtml(OPENCODE_PLUS_VERSION)}</dd>
+          </div>
+          <div>
+            <dt>OpenCode</dt>
+            <dd>${escapeHtml(OPENCODE_VERSION)}</dd>
+          </div>
+          <div>
+            <dt>Repository</dt>
+            <dd><a href="${GITHUB_URL}" target="_blank" rel="noopener noreferrer">github.com/datbird/opencode-plus</a></dd>
+          </div>
+        </dl>
+        <p class="ocp-drawer__field-detail">This project is unofficial and is not affiliated with or endorsed by the upstream OpenCode project.</p>
+      </div>
+    `;
+    modal.hidden = false;
+    modal.querySelector(".ocp-drawer__modal-close").focus();
+  }
+
   function closeModuleConfig(root) {
     const modal = root.querySelector(".ocp-drawer__modal");
     if (modal) modal.hidden = true;
@@ -1094,6 +1126,7 @@
           <h2>OpenCode Plus Controls</h2>
         </div>
         <div class="ocp-drawer__header-actions">
+          <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
           <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__opencode-restart-header">Restart</button>
           <button type="button" class="ocp-drawer__close">Hide</button>
         </div>
@@ -1125,6 +1158,7 @@
     });
 
     panel.querySelector(".ocp-drawer__close").addEventListener("click", () => setOpen(root, settings, false));
+    panel.querySelector(".ocp-drawer__help").addEventListener("click", () => openHelp(root));
     wireRestartButton(panel.querySelector(".ocp-drawer__opencode-restart-header"));
     modal.querySelectorAll("[data-modal-close]").forEach((element) => {
       element.addEventListener("click", () => closeModuleConfig(root));
