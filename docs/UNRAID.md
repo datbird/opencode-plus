@@ -67,9 +67,13 @@ Place copied OpenCode state under:
 /mnt/user/appdata/opencode-plus/persist/root/.config/opencode
 /mnt/user/appdata/opencode-plus/persist/root/.local/share/opencode
 /mnt/user/appdata/opencode-plus/persist/root/.cache/opencode
+/mnt/user/appdata/opencode-plus/persist/root/.mymcp
+/mnt/user/appdata/opencode-plus/persist/root/.config/op
 ```
 
-This keeps auth, sessions, model metadata, memories, and tool output durable across image rebuilds.
+This keeps auth, sessions, model metadata, memories, tool output, mymcp credential registry, and 1Password CLI account/session renewal state durable across image rebuilds.
+
+For live containers that directly bind-mount only the three OpenCode state directories, `.mymcp` and `.config/op` still need to live under `/config/persist/root` so the startup restore copies them into `/root`. Do not leave those support paths only in the container overlay after a repair.
 
 ## Cloudflare Access
 

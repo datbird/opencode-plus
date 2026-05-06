@@ -35,8 +35,12 @@ Persist these paths under `/config/persist/root`:
 - `.config/opencode`: config, memories, and project instructions.
 - `.local/share/opencode`: auth, sessions, database, logs, and tool outputs.
 - `.cache/opencode`: cache/model metadata.
+- `.mymcp`: mymcp credential registry, encrypted 1Password renewal state, and active op session cache.
+- `.config/op`: 1Password CLI account configuration required before `OP_SESSION_*` values can be used.
 - `.config/gh`: GitHub CLI auth if desired.
 - `.ssh`: SSH keys and known hosts if desired.
+
+The support credential paths above are not direct bind mounts in the current live containers. They must exist under `/config/persist/root` so the entrypoint's startup restore recreates them after container restart/recreate. If a live repair copies `.mymcp` or `.config/op` from another container into `/root`, immediately sync it back into `/config/persist/root`; otherwise the fix only lives in the Docker overlay and will disappear on recreate.
 
 Do not bake credentials, session databases, personal memories, provider auth, SSH keys, or workspace data into the image.
 
