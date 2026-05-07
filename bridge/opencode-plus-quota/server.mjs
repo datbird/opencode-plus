@@ -6,8 +6,6 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { queryAnthropicQuota } from '/root/.cache/opencode/packages/@slkiser/opencode-quota@latest/node_modules/@slkiser/opencode-quota/dist/lib/anthropic.js';
-
 const HOST = process.env.OPENCODE_SIDECAR_HOST || '0.0.0.0';
 const PORT = Number(process.env.OPENCODE_SIDECAR_PORT || 18765);
 const CACHE_MS = Number(process.env.OPENCODE_SIDECAR_CACHE_MS || 15000);
@@ -879,32 +877,7 @@ async function getClaudeProvider() {
 }
 
 async function getClaudeSubscriptionProvider() {
-  try {
-    const result = await queryAnthropicQuota({});
-    if (!result) return { id: 'claude', label: 'Claude', status: 'not_configured', windows: [] };
-    if (!result.success) {
-      const error = String(result.error || 'Claude quota unavailable');
-      return {
-        id: 'claude',
-        label: 'Claude',
-        status: isClaudeNotConfiguredError(error) ? 'not_configured' : 'error',
-        error,
-        windows: [],
-      };
-    }
-
-    return {
-      id: 'claude',
-      label: 'Claude',
-      status: 'ok',
-      windows: [
-        windowEntry('5h', result.five_hour),
-        windowEntry('7d', result.seven_day),
-      ].filter(Boolean),
-    };
-  } catch (error) {
-    return { id: 'claude', label: 'Claude', status: 'error', error: error instanceof Error ? error.message : String(error), windows: [] };
-  }
+  return { id: 'claude', label: 'Claude', status: 'not_configured', windows: [], values: [{ label: 'Sub', value: 'not supported' }] };
 }
 
 async function getAnthropicAdminProvider() {
@@ -969,10 +942,6 @@ async function getAnthropicOpenCodeProvider() {
   const key = resolveApiKeyAuth(await readOpenCodeAuth(), ANTHROPIC_AUTH_SOURCE_KEYS);
   if (!key) return { id: 'claude', label: 'Anthropic API', status: 'not_configured', windows: [], values: [{ label: 'Auth', value: 'not set' }] };
   return { id: 'claude', label: 'Anthropic API', status: 'ok', windows: [], values: [{ label: 'Auth', value: 'API key' }] };
-}
-
-function isClaudeNotConfiguredError(error) {
-  return /not found|not configured|auth|login|credential|subscription|quota unavailable|quota was unavailable|no quota/i.test(error);
 }
 
 const server = http.createServer(async (req, res) => {

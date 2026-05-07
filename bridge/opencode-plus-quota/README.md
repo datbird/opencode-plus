@@ -2,7 +2,7 @@
 
 Tiny local HTTP bridge for OpenCode Enhancement Suite.
 
-It reads OpenAI ChatGPT usage, OpenRouter credits, and Gemini Code Assist quota directly, and still reuses the installed `@slkiser/opencode-quota` reader for Claude. It exposes browser-safe JSON at:
+It reads OpenAI ChatGPT usage, OpenRouter credits, Gemini Code Assist quota, and configured provider API/Admin status directly. It exposes browser-safe JSON at:
 
 - `http://127.0.0.1:18765/health`
 - `http://127.0.0.1:18765/quota`
@@ -27,5 +27,5 @@ OpenRouter account credits use `OPENROUTER_MANAGEMENT_KEY` and the official `htt
 
 Known current limitations:
 
-- Claude can report Anthropic auth/rate-limit errors.
+- Claude subscription-window quota is not reported. Anthropic Admin/API auth status can be shown when configured.
 - Shell `op` must be signed in for automatic OpenRouter key lookup unless `OPENROUTER_MANAGEMENT_KEY` is already set.

@@ -132,12 +132,26 @@
 }
 
 .ocp-drawer__close {
+  align-items: center;
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
   color: var(--ocp-drawer-text);
   cursor: pointer;
-  padding: 7px 12px;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 760;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 32px;
+}
+
+.ocp-drawer__close:hover {
+  background: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.24);
 }
 
 .ocp-drawer__help {
@@ -308,6 +322,36 @@
 .ocp-drawer__system-vault-summary {
   color: var(--ocp-drawer-muted);
   font-size: 12px;
+  line-height: 1.35;
+}
+
+.ocp-drawer__hidden-toggle {
+  align-items: flex-start;
+  color: rgba(245, 245, 245, 0.82);
+  display: flex;
+  gap: 10px;
+}
+
+.ocp-drawer__hidden-toggle input {
+  accent-color: var(--ocp-drawer-accent);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.ocp-drawer__hidden-toggle span {
+  display: grid;
+  gap: 3px;
+}
+
+.ocp-drawer__hidden-toggle strong {
+  color: rgba(245, 245, 245, 0.9);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ocp-drawer__hidden-toggle small {
+  color: var(--ocp-drawer-muted);
+  font-size: 11px;
   line-height: 1.35;
 }
 

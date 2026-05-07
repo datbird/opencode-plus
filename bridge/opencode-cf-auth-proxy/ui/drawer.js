@@ -15,6 +15,7 @@
     open: false,
     handleXPercent: 72,
     mobileHandleXPercent: null,
+    nativeControlsCollapsed: false,
     modules: {
       openai: true,
       gemini: true,
@@ -43,10 +44,8 @@
   ];
 
   const CONFIG_AREAS = [
-    { id: "restart", label: "Restart OpenCode", description: "Restart the OpenCode server while OpenCode Plus stays online." },
-    { id: "system", label: "OpenCode System", description: "Global OpenCode Plus settings, vault encryption, and runtime preferences." },
-    { id: "gateway", label: "Gateway", description: "Cloudflare Access, local auth handoff, and gateway health." },
-    { id: "statusline", label: "Statusline Modules", description: "Enable chips and configure provider-specific statusline settings." },
+    { id: "system", label: "OpenCode Plus Settings", description: "Gateway, statusline modules, vault encryption, and runtime preferences." },
+    { id: "hidden", label: "OpenCode Hidden Settings", description: "Access persisted OpenCode settings that normally only live in config." },
   ];
 
   function readSettings() {
@@ -394,6 +393,22 @@
     return response.json();
   }
 
+  async function fetchOpenCodeConfig() {
+    const response = await fetch("/__opencode-plus/opencode/config", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function updateOpenCodeConfig(config) {
+    const response = await fetch("/__opencode-plus/opencode/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
   async function restartOpenCode() {
     const response = await fetch("/__opencode-plus/opencode/restart", { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -694,11 +709,14 @@
     }
   }
 
-  async function setupSystemControls(container) {
+  async function setupSystemControls(root, container, settings) {
     const keyStatus = container.querySelector(".ocp-drawer__system-key-status");
     const generateButton = container.querySelector(".ocp-drawer__system-key-generate");
     const regenerateButton = container.querySelector(".ocp-drawer__system-key-regenerate");
     const restartButton = container.querySelector(".ocp-drawer__opencode-restart");
+    const moduleList = container.querySelector(".ocp-drawer__system-module-list");
+    const nativeCollapsed = container.querySelector(".ocp-drawer__plus-native-collapsed");
+    const drawerOpen = container.querySelector(".ocp-drawer__plus-drawer-open");
 
     async function refreshStatus() {
       try {
@@ -754,6 +772,19 @@
       }
     });
 
+    if (moduleList) {
+      MODULES.forEach((module) => {
+        moduleList.append(createModuleRow(module, settings, (selectedModule) => openModuleConfig(root, selectedModule)));
+      });
+    }
+    nativeCollapsed?.addEventListener("change", () => {
+      settings.nativeControlsCollapsed = nativeCollapsed.checked;
+      writeSettings(settings);
+    });
+    drawerOpen?.addEventListener("change", () => {
+      setOpen(root, settings, drawerOpen.checked);
+    });
+    setupGatewayControls(container);
     await refreshStatus();
   }
 
@@ -804,6 +835,32 @@
         </div>
       </div>
       <div class="ocp-drawer__system-section">
+        <h4>Gateway</h4>
+        ${gatewayConfigMarkup()}
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Statusline Modules</h4>
+        <p class="ocp-drawer__field-detail">Enable or disable each statusline module. Provider gears open credentials and module-specific settings.</p>
+        <div class="ocp-drawer__module-list ocp-drawer__system-module-list"></div>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>OpenCode Plus UI</h4>
+        <label class="ocp-drawer__hidden-toggle">
+          <input class="ocp-drawer__plus-native-collapsed" type="checkbox" ${readSettings().nativeControlsCollapsed ? "checked" : ""}>
+          <span>
+            <strong>Always collapse built-in composer controls</strong>
+            <small>Keep the native Mode, Model, and Effort controls tucked behind the statusline chevron after refreshes.</small>
+          </span>
+        </label>
+        <label class="ocp-drawer__hidden-toggle">
+          <input class="ocp-drawer__plus-drawer-open" type="checkbox" ${readSettings().open ? "checked" : ""}>
+          <span>
+            <strong>Keep OpenCode Plus drawer open</strong>
+            <small>Persist the drawer in its open state across page refreshes until you hide it.</small>
+          </span>
+        </label>
+      </div>
+      <div class="ocp-drawer__system-section">
         <h4>Encryption Key</h4>
         <p class="ocp-drawer__system-key-status">Checking encryption key...</p>
         <p class="ocp-drawer__system-vault-summary">Checking encrypted vault...</p>
@@ -814,6 +871,52 @@
         <p class="ocp-drawer__field-detail">Regenerating creates a new encryption key and wipes the encrypted provider credential vault. Saved OpenRouter or Gemini vault credentials must be re-entered afterward.</p>
       </div>
     `;
+  }
+
+  function hiddenSettingsMarkup(settings) {
+    return `
+      <p class="ocp-drawer__modal-intro">These controls write OpenCode config-file settings that are not persistently exposed by the standard OpenCode Web UI.</p>
+      <div class="ocp-drawer__system-section">
+        <label class="ocp-drawer__hidden-toggle">
+          <input class="ocp-drawer__hidden-auto-accept" type="checkbox" disabled>
+          <span>
+            <strong>Always auto-accept permissions</strong>
+            <small>Persistently writes <code>permission: "allow"</code> to OpenCode config so approvals stay auto-accepted after server restarts.</small>
+          </span>
+        </label>
+        <p class="ocp-drawer__field-detail ocp-drawer__hidden-config-detail">Checking OpenCode config...</p>
+      </div>
+    `;
+  }
+
+  async function setupHiddenSettingsControls(container) {
+    const autoAccept = container.querySelector(".ocp-drawer__hidden-auto-accept");
+    const detail = container.querySelector(".ocp-drawer__hidden-config-detail");
+    if (!autoAccept) return;
+
+    try {
+      const response = await fetchOpenCodeConfig();
+      autoAccept.checked = Boolean(response?.config?.auto_accept_permissions);
+      if (detail) detail.textContent = `Config file: ${response?.config?.config_file || "OpenCode config"}. Restart OpenCode for server-loaded config changes to fully apply.`;
+      autoAccept.disabled = false;
+    } catch (error) {
+      if (detail) detail.textContent = `OpenCode config unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    autoAccept.addEventListener("change", async () => {
+      autoAccept.disabled = true;
+      if (detail) detail.textContent = "Saving OpenCode permission config...";
+      try {
+        const response = await updateOpenCodeConfig({ auto_accept_permissions: autoAccept.checked });
+        autoAccept.checked = Boolean(response?.config?.auto_accept_permissions);
+        if (detail) detail.textContent = "Saved. Restart OpenCode for server-loaded config changes to fully apply.";
+      } catch (error) {
+        autoAccept.checked = !autoAccept.checked;
+        if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        autoAccept.disabled = false;
+      }
+    });
   }
 
   function credentialFormMarkup(provider) {
@@ -985,7 +1088,7 @@
       setupRestartControls(body);
     } else if (area.id === "system") {
       body.innerHTML = systemConfigMarkup();
-      setupSystemControls(body);
+      setupSystemControls(root, body, settings);
     } else if (area.id === "gateway") {
       body.innerHTML = gatewayConfigMarkup();
       setupGatewayControls(body);
@@ -995,6 +1098,9 @@
       MODULES.forEach((module) => {
         moduleList.append(createModuleRow(module, settings, (selectedModule) => openModuleConfig(root, selectedModule)));
       });
+    } else if (area.id === "hidden") {
+      body.innerHTML = hiddenSettingsMarkup(settings);
+      setupHiddenSettingsControls(body);
     } else {
       body.innerHTML = `<p class="ocp-drawer__empty-config">No configuration is available for ${area.label} yet.</p>`;
     }
@@ -1126,9 +1232,9 @@
           <h2>OpenCode Plus Controls</h2>
         </div>
         <div class="ocp-drawer__header-actions">
-          <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
           <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__opencode-restart-header">Restart</button>
-          <button type="button" class="ocp-drawer__close">Hide</button>
+          <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
+          <button type="button" class="ocp-drawer__close" aria-label="Close OpenCode Plus controls" title="Close">X</button>
         </div>
       </div>
       <div class="ocp-drawer__config-shell">

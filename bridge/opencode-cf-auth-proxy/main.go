@@ -46,6 +46,7 @@ type config struct {
 	QuotaURL            string
 	SecretsDir          string
 	ConfigFile          string
+	OpenCodeConfigFile  string
 }
 
 type plusConfig struct {
@@ -164,6 +165,7 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/secrets/provider/gemini", protectedHandler(auth, cfg, cache, secretsProviderHandler(cfg, "gemini")))
 	mux.HandleFunc("/__opencode-plus/secrets/provider/xai", protectedHandler(auth, cfg, cache, secretsProviderHandler(cfg, "xai")))
 	mux.HandleFunc("/__opencode-plus/config", configHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/opencode/config", openCodeConfigHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
 	mux.HandleFunc("/__opencode-plus/quota", quotaHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/", uiAssetHandler(cfg))
@@ -247,6 +249,7 @@ func loadConfig() (config, error) {
 		QuotaURL:            env("OPENCODE_PLUS_QUOTA_URL", "http://127.0.0.1:18765/quota"),
 		SecretsDir:          env("OPENCODE_PLUS_SECRETS_DIR", "/config/persist/opencode-plus-secrets"),
 		ConfigFile:          env("OPENCODE_PLUS_CONFIG_FILE", "/config/persist/opencode-plus-config.json"),
+		OpenCodeConfigFile:  env("OPENCODE_CONFIG_FILE", "/root/aiplayground/opencode.json"),
 	}
 
 	allowed := strings.Split(os.Getenv("ALLOWED_EMAILS"), ",")
@@ -986,6 +989,86 @@ func configHandler(cfg config) http.HandlerFunc {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+func openCodeConfigHandler(cfg config) http.HandlerFunc {
+	type update struct {
+		AutoAcceptPermissions *bool `json:"auto_accept_permissions"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			config, err := readOpenCodeConfig(cfg)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "opencode_config_read_failed", "detail": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": openCodeHiddenConfigStatus(cfg, config)})
+		case http.MethodPost:
+			defer r.Body.Close()
+			var patch update
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&patch); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+				return
+			}
+			config, err := readOpenCodeConfig(cfg)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "opencode_config_read_failed", "detail": err.Error()})
+				return
+			}
+			if patch.AutoAcceptPermissions != nil {
+				if *patch.AutoAcceptPermissions {
+					config["permission"] = "allow"
+				} else if value, ok := config["permission"].(string); ok && value == "allow" {
+					config["permission"] = map[string]any{"skill": map[string]any{"*": "allow"}}
+				}
+			}
+			if err := writeOpenCodeConfig(cfg, config); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "opencode_config_write_failed", "detail": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": openCodeHiddenConfigStatus(cfg, config)})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func readOpenCodeConfig(cfg config) (map[string]any, error) {
+	body, err := os.ReadFile(cfg.OpenCodeConfigFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]any{"$schema": "https://opencode.ai/config.json"}, nil
+		}
+		return nil, err
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed, nil
+}
+
+func writeOpenCodeConfig(cfg config, next map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(cfg.OpenCodeConfigFile), 0o755); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfg.OpenCodeConfigFile, append(body, '\n'), 0o644)
+}
+
+func openCodeHiddenConfigStatus(cfg config, config map[string]any) map[string]any {
+	autoAccept := false
+	if value, ok := config["permission"].(string); ok && value == "allow" {
+		autoAccept = true
+	}
+	return map[string]any{
+		"auto_accept_permissions": autoAccept,
+		"config_file":             cfg.OpenCodeConfigFile,
 	}
 }
 

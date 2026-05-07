@@ -69,7 +69,7 @@ Run syntax checks with:
 node --check bridge/opencode-plus-quota/server.mjs
 ```
 
-OpenAI usage is collected natively from OpenCode OAuth state in `~/.local/share/opencode/auth.json` and `https://chatgpt.com/backend-api/wham/usage`. OpenRouter and Gemini are native collectors. Claude still uses `@slkiser/opencode-quota` for now.
+OpenAI usage is collected natively from OpenCode OAuth state in `~/.local/share/opencode/auth.json` and `https://chatgpt.com/backend-api/wham/usage`. OpenRouter, Gemini, Anthropic Admin/API status, and other provider status modules are native collectors. Claude subscription-window quota is not reported.
 
 For live UI iteration, set `OPENCODE_PLUS_UI_ASSET_DIR` to a writable persistent directory and edit `drawer.js` / `drawer.css` there. Once the UI is approved, copy those files back into `bridge/opencode-cf-auth-proxy/ui/` so the next image build embeds them.
 
