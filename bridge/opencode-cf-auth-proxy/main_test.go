@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShouldRedirectRootRequest(t *testing.T) {
@@ -161,5 +163,67 @@ func TestAuthHandlerUpdatesCloudflareAuthWithoutChangingLocalAuth(t *testing.T) 
 	}
 	if body["local_auth_configured"] != true {
 		t.Fatalf("local_auth_configured = %v, want true", body["local_auth_configured"])
+	}
+}
+
+func TestMountPathValidationRequiresWorkspaceMountsChild(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	if err := validateMountPath(workspace, filepath.Join(workspace, "mounts", "nas")); err != nil {
+		t.Fatalf("valid mount path rejected: %v", err)
+	}
+	if err := validateMountPath(workspace, filepath.Join(filepath.Dir(workspace), "outside")); err == nil {
+		t.Fatal("outside mount path was accepted")
+	}
+	if err := validateMountPath("/root", "/root/mounts/nas"); err == nil {
+		t.Fatal("broad workspace root was accepted")
+	}
+}
+
+func TestMountManagerCreateRedactsSecretsAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	manager := newMountManager(config{MountsDir: dir})
+	mount, err := manager.create(mountCreateRequest{
+		Name:          "Remote Server",
+		Type:          "ssh",
+		WorkspaceRoot: filepath.Join(dir, "workspace"),
+		MountName:     "remote-server",
+		Remote: map[string]string{
+			"host":     "example.test",
+			"password": "should-redact",
+		},
+		Options: mountOptions{ReadOnly: true, AutoReconnect: true},
+		Secret:  mountSecret{Username: "robert", Password: "secret"},
+	})
+	if err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+	if mount["mount_path"] == "" {
+		t.Fatalf("mount snapshot missing mount_path: %#v", mount)
+	}
+	remote, ok := mount["remote"].(map[string]string)
+	if !ok {
+		t.Fatalf("remote snapshot has unexpected type: %#v", mount["remote"])
+	}
+	if remote["password"] != "redacted" {
+		t.Fatalf("remote password not redacted: %#v", remote)
+	}
+	if body, err := os.ReadFile(filepath.Join(dir, "config.json")); err != nil || strings.Contains(string(body), "secret") {
+		t.Fatalf("config file read failed or contains secret: err=%v body=%s", err, string(body))
+	}
+}
+
+func TestRetryAfterBacksOffAndCaps(t *testing.T) {
+	first := retryAfter(1)
+	second := retryAfter(2)
+	late := retryAfter(20)
+	if !second.After(first) {
+		t.Fatalf("second retry should be after first: first=%s second=%s", first, second)
+	}
+	if timeUntil := time.Until(late); timeUntil > 31*time.Minute {
+		t.Fatalf("retry cap exceeded: %s", timeUntil)
 	}
 }

@@ -112,3 +112,20 @@ OPENCODE_PLUS_UI_ASSET_DIR=/config/persist/opencode-plus-ui
 ```
 
 Then edit `drawer.js` and `drawer.css` in that directory and refresh the browser. Rebuild the image only after the drawer behavior and styling are ready to bake into the embedded gateway assets.
+
+## Soul Sync Backplane
+
+When using multiple OpenCode Plus containers with PocketBase, connect each OpenCode Plus container and the PocketBase container to the same Docker network, for example `opencode-plus-backplane`.
+
+Set stable deployment identity variables in each Unraid container template:
+
+```text
+OPENCODE_PLUS_SOUL_DB_ENABLED=true
+OPENCODE_PLUS_SOUL_PB_URL=http://pocketbase:8080
+OPENCODE_PLUS_DEPLOYMENT_ID=opencode1
+OPENCODE_PLUS_DEPLOYMENT_NAME=opencode1
+```
+
+For a second container, use `opencode2` for both deployment fields. These values must be durable in the Unraid template because Docker-generated hostnames can change when a container is recreated.
+
+Apply the PocketBase migration tracked in `pb_migrations/202605080041_opencode_plus_soul_sync.js` before enabling synced features. The drawer's `Soul & Sync` section should report `schema_ready:true` and will keep `Create Synced Project` disabled until at least one Named Space exists.

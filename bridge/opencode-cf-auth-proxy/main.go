@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -47,6 +48,11 @@ type config struct {
 	SecretsDir          string
 	ConfigFile          string
 	OpenCodeConfigFile  string
+	MountsDir           string
+	SoulDBEnabled       bool
+	SoulPBURL           string
+	DeploymentID        string
+	DeploymentName      string
 }
 
 type plusConfig struct {
@@ -93,6 +99,23 @@ type authStateFile struct {
 	CloudflareAuthEnabled bool `json:"cloudflare_auth_enabled"`
 }
 
+type updateStatus struct {
+	mu         sync.RWMutex
+	Running    bool   `json:"running"`
+	Stage      string `json:"stage"`
+	StartedAt  string `json:"started_at,omitempty"`
+	EndedAt    string `json:"ended_at,omitempty"`
+	Before     string `json:"before_version,omitempty"`
+	Latest     string `json:"latest_version,omitempty"`
+	After      string `json:"after_version,omitempty"`
+	ReleaseURL string `json:"release_url,omitempty"`
+	Changelog  string `json:"changelog,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Log        string `json:"log,omitempty"`
+}
+
+var opencodeUpdate = &updateStatus{Stage: "idle"}
+
 type accessClaims struct {
 	Email string `json:"email"`
 	jwt.RegisteredClaims
@@ -131,6 +154,8 @@ func main() {
 
 	cache := &jwksCache{}
 	auth := newAuthState(cfg)
+	mounts := newMountManager(cfg)
+	mounts.Start()
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	originalDirector := proxy.Director
 	proxy.Director = func(r *http.Request) {
@@ -165,8 +190,14 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/secrets/provider/gemini", protectedHandler(auth, cfg, cache, secretsProviderHandler(cfg, "gemini")))
 	mux.HandleFunc("/__opencode-plus/secrets/provider/xai", protectedHandler(auth, cfg, cache, secretsProviderHandler(cfg, "xai")))
 	mux.HandleFunc("/__opencode-plus/config", configHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/soul/status", soulStatusHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/opencode/config", openCodeConfigHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
+	mux.HandleFunc("/__opencode-plus/opencode/update/check", updateOpenCodeCheckHandler())
+	mux.HandleFunc("/__opencode-plus/opencode/update", protectedHandler(auth, cfg, cache, updateOpenCodeHandler(cfg)))
+	mux.HandleFunc("/__opencode-plus/opencode/update/status", updateOpenCodeStatusHandler())
+	mux.HandleFunc("/__opencode-plus/mounts", protectedHandler(auth, cfg, cache, mounts.CollectionHandler()))
+	mux.HandleFunc("/__opencode-plus/mounts/", protectedHandler(auth, cfg, cache, mounts.ItemHandler()))
 	mux.HandleFunc("/__opencode-plus/quota", quotaHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/", uiAssetHandler(cfg))
 	mux.HandleFunc("/assets/", uiAssetOverrideHandler(cfg, proxy))
@@ -250,6 +281,11 @@ func loadConfig() (config, error) {
 		SecretsDir:          env("OPENCODE_PLUS_SECRETS_DIR", "/config/persist/opencode-plus-secrets"),
 		ConfigFile:          env("OPENCODE_PLUS_CONFIG_FILE", "/config/persist/opencode-plus-config.json"),
 		OpenCodeConfigFile:  env("OPENCODE_CONFIG_FILE", "/root/aiplayground/opencode.json"),
+		MountsDir:           env("OPENCODE_PLUS_MOUNTS_DIR", "/config/persist/opencode-plus-mounts"),
+		SoulDBEnabled:       envBool("OPENCODE_PLUS_SOUL_DB_ENABLED", true),
+		SoulPBURL:           strings.TrimRight(env("OPENCODE_PLUS_SOUL_PB_URL", "http://pocketbase:8080"), "/"),
+		DeploymentID:        env("OPENCODE_PLUS_DEPLOYMENT_ID", env("HOSTNAME", "opencode-plus")),
+		DeploymentName:      env("OPENCODE_PLUS_DEPLOYMENT_NAME", env("HOSTNAME", "OpenCode Plus")),
 	}
 
 	allowed := strings.Split(os.Getenv("ALLOWED_EMAILS"), ",")
@@ -552,13 +588,331 @@ func plusHealthHandler(cfg config, upstream *url.URL) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           true,
-			"service":      "opencode-plus-ui-gateway",
-			"ui_enabled":   cfg.UIEnabled,
-			"external_ui":  cfg.UIAssetDir != "",
-			"upstream_url": upstream.String(),
+			"ok":               true,
+			"service":          "opencode-plus-ui-gateway",
+			"ui_enabled":       cfg.UIEnabled,
+			"external_ui":      cfg.UIAssetDir != "",
+			"upstream_url":     upstream.String(),
+			"opencode_version": currentOpenCodeVersion(),
+			"support":          supportVersionInfo(cfg),
 		})
 	}
+}
+
+func soulStatusHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		features := map[string]any{
+			"souls":           "not initialized",
+			"skills":          "not initialized",
+			"commands":        "not initialized",
+			"tools":           "not initialized",
+			"plugins_hooks":   "not initialized",
+			"named_spaces":    "not initialized",
+			"synced_projects": "not initialized",
+		}
+		status := map[string]any{
+			"ok": true,
+			"enabled": cfg.SoulDBEnabled,
+			"ready": false,
+			"state": mapBool(cfg.SoulDBEnabled, "checking", "disabled"),
+			"schema_ready": false,
+			"named_space_count": 0,
+			"deployment": map[string]string{
+				"id":   cfg.DeploymentID,
+				"name": cfg.DeploymentName,
+			},
+			"pocketbase": map[string]any{
+				"url":       cfg.SoulPBURL,
+				"connected": false,
+			},
+			"features": features,
+		}
+		if !cfg.SoulDBEnabled {
+			status["state"] = "disabled"
+			writeJSON(w, http.StatusOK, status)
+			return
+		}
+
+		connected, detail := checkPocketBaseHealth(cfg.SoulPBURL)
+		schemaReady, schemaFeatures, namedSpaceCount := checkSoulSchema(cfg.SoulPBURL)
+		status["ready"] = connected && schemaReady
+		status["schema_ready"] = schemaReady
+		status["named_space_count"] = namedSpaceCount
+		if connected && schemaReady {
+			status["state"] = "ready"
+		} else if connected {
+			status["state"] = "schema_missing"
+		} else {
+			status["state"] = "degraded"
+		}
+		status["features"] = schemaFeatures
+		status["pocketbase"] = map[string]any{
+			"url":       cfg.SoulPBURL,
+			"connected": connected,
+			"detail":    detail,
+		}
+		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+func checkSoulSchema(baseURL string) (bool, map[string]any, int) {
+	collections := map[string]string{
+		"souls":           "opcp_souls",
+		"skills":          "opcp_assets",
+		"commands":        "opcp_assets",
+		"tools":           "opcp_assets",
+		"plugins_hooks":   "opcp_assets",
+		"named_spaces":    "opcp_named_spaces",
+		"synced_projects": "opcp_synced_projects",
+	}
+	features := map[string]any{}
+	ready := true
+	for feature, collection := range collections {
+		ok, _ := checkPocketBaseCollection(baseURL, collection)
+		if ok {
+			features[feature] = "initialized"
+		} else {
+			features[feature] = "not initialized"
+			ready = false
+		}
+	}
+	for _, collection := range []string{"opcp_deployments", "opcp_roles", "opcp_deployment_roles", "opcp_deployment_asset_overrides", "opcp_deployment_space_paths", "opcp_deployment_project_paths", "opcp_render_history"} {
+		ok, _ := checkPocketBaseCollection(baseURL, collection)
+		if !ok {
+			ready = false
+		}
+	}
+	namedSpaceCount := pocketBaseCollectionTotal(baseURL, "opcp_named_spaces")
+	return ready, features, namedSpaceCount
+}
+
+func checkPocketBaseCollection(baseURL, collection string) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	url := strings.TrimRight(baseURL, "/") + "/api/collections/" + url.PathEscape(collection) + "/records?perPage=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err.Error()
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return false, fmt.Sprintf("HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return true, strings.TrimSpace(string(body))
+}
+
+func pocketBaseCollectionTotal(baseURL, collection string) int {
+	ok, body := checkPocketBaseCollection(baseURL, collection)
+	if !ok {
+		return 0
+	}
+	var parsed struct {
+		TotalItems int `json:"totalItems"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return 0
+	}
+	return parsed.TotalItems
+}
+
+func checkPocketBaseHealth(baseURL string) (bool, string) {
+	if strings.TrimSpace(baseURL) == "" {
+		return false, "PocketBase URL is not configured"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/health", nil)
+	if err != nil {
+		return false, err.Error()
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+	detail := strings.TrimSpace(string(body))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return false, fmt.Sprintf("HTTP %d %s", res.StatusCode, detail)
+	}
+	if detail == "" {
+		detail = "PocketBase health endpoint responded"
+	}
+	return true, detail
+}
+
+func supportVersionInfo(cfg config) []map[string]string {
+	items := []struct {
+		Name  string
+		Cmd   string
+		Args  []string
+		Shell string
+	}{
+		{Name: "os", Shell: ". /etc/os-release 2>/dev/null && printf '%s %s' \"$NAME\" \"$VERSION_ID\""},
+		{Name: "kernel", Cmd: "uname", Args: []string{"-srmo"}},
+		{Name: "architecture", Cmd: "dpkg", Args: []string{"--print-architecture"}},
+		{Name: "opencode", Cmd: "opencode", Args: []string{"--version"}},
+		{Name: "bash", Cmd: "bash", Args: []string{"--version"}},
+		{Name: "zsh", Cmd: "zsh", Args: []string{"--version"}},
+		{Name: "fish", Cmd: "fish", Args: []string{"--version"}},
+		{Name: "node", Cmd: "node", Args: []string{"--version"}},
+		{Name: "npm", Cmd: "npm", Args: []string{"--version"}},
+		{Name: "npm-global-packages", Shell: "npm list -g --depth=0 --json 2>/dev/null | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d);process.stdin.on(\"end\",()=>{const j=JSON.parse(s||\"{}\");console.log(Object.entries(j.dependencies||{}).map(([n,v])=>`${n}@${v.version||\"?\"}`).join(\", \"))})'"},
+		{Name: "pnpm", Cmd: "pnpm", Args: []string{"--version"}},
+		{Name: "corepack", Cmd: "corepack", Args: []string{"--version"}},
+		{Name: "python3", Cmd: "python3", Args: []string{"--version"}},
+		{Name: "pipx", Cmd: "pipx", Args: []string{"--version"}},
+		{Name: "pipx-packages", Shell: "PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx list --short 2>/dev/null | paste -sd ', ' -"},
+		{Name: "uv", Cmd: "uv", Args: []string{"--version"}},
+		{Name: "deno", Cmd: "deno", Args: []string{"--version"}},
+		{Name: "bun", Cmd: "bun", Args: []string{"--version"}},
+		{Name: "go", Cmd: "go", Args: []string{"version"}},
+		{Name: "rustc", Cmd: "rustc", Args: []string{"--version"}},
+		{Name: "cargo", Cmd: "cargo", Args: []string{"--version"}},
+		{Name: "java", Cmd: "java", Args: []string{"--version"}},
+		{Name: "ruby", Cmd: "ruby", Args: []string{"--version"}},
+		{Name: "perl", Cmd: "perl", Args: []string{"--version"}},
+		{Name: "git", Cmd: "git", Args: []string{"--version"}},
+		{Name: "git-lfs", Cmd: "git-lfs", Args: []string{"--version"}},
+		{Name: "gh", Cmd: "gh", Args: []string{"--version"}},
+		{Name: "docker", Cmd: "docker", Args: []string{"--version"}},
+		{Name: "docker-compose", Cmd: "docker", Args: []string{"compose", "version"}},
+		{Name: "devcontainer", Cmd: "devcontainer", Args: []string{"--version"}},
+		{Name: "jq", Cmd: "jq", Args: []string{"--version"}},
+		{Name: "yq", Cmd: "yq", Args: []string{"--version"}},
+		{Name: "ripgrep", Cmd: "rg", Args: []string{"--version"}},
+		{Name: "fd", Cmd: "fd", Args: []string{"--version"}},
+		{Name: "fzf", Cmd: "fzf", Args: []string{"--version"}},
+		{Name: "tmux", Cmd: "tmux", Args: []string{"-V"}},
+		{Name: "screen", Cmd: "screen", Args: []string{"--version"}},
+		{Name: "sqlite3", Cmd: "sqlite3", Args: []string{"--version"}},
+		{Name: "openssl", Cmd: "openssl", Args: []string{"version"}},
+		{Name: "curl", Cmd: "curl", Args: []string{"--version"}},
+		{Name: "wget", Cmd: "wget", Args: []string{"--version"}},
+		{Name: "rsync", Cmd: "rsync", Args: []string{"--version"}},
+		{Name: "supervisorctl", Cmd: "supervisorctl", Args: []string{"version"}},
+		{Name: "sshfs", Cmd: "sshfs", Args: []string{"-V"}},
+		{Name: "sshpass", Cmd: "sshpass", Args: []string{"-V"}},
+		{Name: "cloudflared", Cmd: "cloudflared", Args: []string{"--version"}},
+		{Name: "1password-cli", Cmd: "op", Args: []string{"--version"}},
+		{Name: "rclone", Cmd: "rclone", Args: []string{"version"}},
+		{Name: "gcloud", Cmd: "gcloud", Args: []string{"--version"}},
+		{Name: "kubectl", Cmd: "kubectl", Args: []string{"version", "--client=true"}},
+		{Name: "terraform", Cmd: "terraform", Args: []string{"version"}},
+		{Name: "helm", Cmd: "helm", Args: []string{"version", "--short"}},
+		{Name: "ansible", Cmd: "ansible", Args: []string{"--version"}},
+		{Name: "age", Cmd: "age", Args: []string{"--version"}},
+		{Name: "sops", Cmd: "sops", Args: []string{"--version"}},
+		{Name: "restic", Cmd: "restic", Args: []string{"version"}},
+		{Name: "syncthing", Cmd: "syncthing", Args: []string{"--version"}},
+		{Name: "ruff", Cmd: "ruff", Args: []string{"--version"}},
+		{Name: "black", Cmd: "black", Args: []string{"--version"}},
+		{Name: "mypy", Cmd: "mypy", Args: []string{"--version"}},
+		{Name: "python-lsp-server", Cmd: "pylsp", Args: []string{"--version"}},
+		{Name: "debugpy", Cmd: "debugpy", Args: []string{"--version"}},
+		{Name: "eslint", Cmd: "eslint", Args: []string{"--version"}},
+		{Name: "prettier", Cmd: "prettier", Args: []string{"--version"}},
+		{Name: "typescript", Cmd: "tsc", Args: []string{"--version"}},
+		{Name: "pyright", Cmd: "pyright", Args: []string{"--version"}},
+		{Name: "gemini-cli", Cmd: "gemini", Args: []string{"--version"}},
+		{Name: "firebase-tools", Cmd: "firebase", Args: []string{"--version"}},
+		{Name: "wrangler", Cmd: "wrangler", Args: []string{"--version"}},
+		{Name: "tailwindcss-language-server", Cmd: "tailwindcss-language-server", Args: []string{"--version"}},
+		{Name: "bash-language-server", Cmd: "bash-language-server", Args: []string{"--version"}},
+		{Name: "typescript-language-server", Cmd: "typescript-language-server", Args: []string{"--version"}},
+		{Name: "yaml-language-server", Cmd: "yaml-language-server", Args: []string{"--version"}},
+		{Name: "vscode-json-language-server", Cmd: "vscode-json-language-server", Args: []string{"--version"}},
+		{Name: "shellcheck", Cmd: "shellcheck", Args: []string{"--version"}},
+		{Name: "shfmt", Cmd: "shfmt", Args: []string{"--version"}},
+		{Name: "editorconfig-checker", Cmd: "editorconfig-checker", Args: []string{"--version"}},
+		{Name: "lazygit", Cmd: "lazygit", Args: []string{"--version"}},
+		{Name: "helix", Cmd: "hx", Args: []string{"--version"}},
+		{Name: "neovim", Cmd: "nvim", Args: []string{"--version"}},
+		{Name: "emacs", Cmd: "emacs", Args: []string{"--version"}},
+		{Name: "chromium", Cmd: "chromium", Args: []string{"--version"}},
+		{Name: "ffmpeg", Cmd: "ffmpeg", Args: []string{"-version"}},
+		{Name: "pandoc", Cmd: "pandoc", Args: []string{"--version"}},
+		{Name: "imagemagick", Cmd: "convert", Args: []string{"--version"}},
+		{Name: "graphicsmagick", Cmd: "gm", Args: []string{"version"}},
+		{Name: "inkscape", Cmd: "inkscape", Args: []string{"--version"}},
+		{Name: "tesseract", Cmd: "tesseract", Args: []string{"--version"}},
+		{Name: "exiftool", Cmd: "exiftool", Args: []string{"-ver"}},
+		{Name: "poppler-pdftotext", Cmd: "pdftotext", Args: []string{"-v"}},
+		{Name: "qpdf", Cmd: "qpdf", Args: []string{"--version"}},
+		{Name: "graphviz", Cmd: "dot", Args: []string{"-V"}},
+		{Name: "plantuml", Cmd: "plantuml", Args: []string{"-version"}},
+		{Name: "mermaid-cli", Cmd: "mmdc", Args: []string{"--version"}},
+		{Name: "dropbox-cli", Cmd: "dropbox", Args: []string{"version"}},
+	}
+	versions := []map[string]string{
+		{"name": "opencode-plus-ui-gateway", "version": "local Docker build"},
+		{"name": "ui-assets", "version": mapBool(cfg.UIAssetDir != "", "external persisted assets", "embedded assets")},
+	}
+	for _, item := range items {
+		version := ""
+		if item.Shell != "" {
+			version = commandVersionShell(item.Shell)
+		} else {
+			version = commandVersion(item.Cmd, item.Args...)
+		}
+		versions = append(versions, map[string]string{"name": item.Name, "version": version})
+	}
+	return versions
+}
+
+func mapBool(value bool, whenTrue, whenFalse string) string {
+	if value {
+		return whenTrue
+	}
+	return whenFalse
+}
+
+func commandVersion(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil {
+		return "unavailable"
+	}
+	line := strings.TrimSpace(string(output))
+	if line == "" {
+		return "unknown"
+	}
+	line = strings.Split(line, "\n")[0]
+	return shortenStatusLine(line, 300)
+}
+
+func commandVersionShell(script string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "bash", "-lc", script).CombinedOutput()
+	if err != nil {
+		return "unavailable"
+	}
+	line := strings.TrimSpace(string(output))
+	if line == "" {
+		return "unknown"
+	}
+	line = strings.Split(line, "\n")[0]
+	return shortenStatusLine(line, 300)
+}
+
+func shortenStatusLine(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max-3] + "..."
 }
 
 func authHandler(auth *authState, cfg config, cache *jwksCache) http.HandlerFunc {
@@ -1091,6 +1445,338 @@ func restartOpenCodeHandler() http.HandlerFunc {
 		}()
 
 		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "restart_queued", "service": "opencode-server"})
+	}
+}
+
+func updateOpenCodeHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		opencodeUpdate.mu.Lock()
+		if opencodeUpdate.Running {
+			snapshot := updateStatusSnapshotLocked()
+			opencodeUpdate.mu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "update_running", "status": snapshot})
+			return
+		}
+		opencodeUpdate.Running = true
+		opencodeUpdate.Stage = "queued"
+		opencodeUpdate.StartedAt = time.Now().UTC().Format(time.RFC3339)
+		opencodeUpdate.EndedAt = ""
+		opencodeUpdate.Before = ""
+		opencodeUpdate.Latest = ""
+		opencodeUpdate.After = ""
+		opencodeUpdate.ReleaseURL = ""
+		opencodeUpdate.Changelog = ""
+		opencodeUpdate.Error = ""
+		opencodeUpdate.Log = ""
+		snapshot := updateStatusSnapshotLocked()
+		opencodeUpdate.mu.Unlock()
+
+		go runOpenCodeUpdate(cfg)
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": snapshot})
+	}
+}
+
+func updateOpenCodeCheckHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		current := currentOpenCodeVersion()
+		release, err := fetchLatestOpenCodeRelease()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "latest_version_check_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":              true,
+			"current_version": current,
+			"latest_version":  release.Version,
+			"update_available": !versionsEqual(current, release.Version),
+			"release_url":     release.URL,
+			"changelog":       trimForStatus(release.Changelog, 4000),
+		})
+	}
+}
+
+func updateOpenCodeStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		opencodeUpdate.mu.RLock()
+		snapshot := updateStatusSnapshotLocked()
+		opencodeUpdate.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": snapshot})
+	}
+}
+
+func runOpenCodeUpdate(cfg config) {
+	setUpdateStage("checking", "")
+	before := currentOpenCodeVersion()
+	setUpdateVersion("before", before)
+	appendUpdateLog(fmt.Sprintf("Current OpenCode: %s", fallback(before, "unknown")))
+
+	release, err := fetchLatestOpenCodeRelease()
+	if err != nil {
+		setUpdateDone("failed", "", fmt.Errorf("latest version check failed: %w", err))
+		return
+	}
+	setLatestRelease(release)
+	appendUpdateLog(fmt.Sprintf("Latest OpenCode: %s", release.Version))
+	if versionsEqual(before, release.Version) {
+		appendUpdateLog("OpenCode is already current. No update needed.")
+		setUpdateVersion("after", before)
+		setUpdateDone("up_to_date", "", nil)
+		return
+	}
+	appendUpdateLog(fmt.Sprintf("Preparing upgrade %s -> %s", fallback(before, "unknown"), release.Version))
+
+	setUpdateStage("installing", "")
+	installScript := strings.Join([]string{
+		"set -euo pipefail",
+		"export HOME=/root USER=root LOGNAME=root PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}",
+		fmt.Sprintf("echo \"Installing OpenCode %s...\"", release.Version),
+		fmt.Sprintf("curl -fsSL https://opencode.ai/install | bash -s -- --version %q --no-modify-path", release.Version),
+		"ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode",
+	}, "\n")
+	if err := runLoggedCommand(5*time.Minute, installScript, "OPENCODE_SERVER_PORT="+serverPortFromConfig(cfg)); err != nil {
+		setUpdateVersion("after", currentOpenCodeVersion())
+		setUpdateDone("failed", "", err)
+		return
+	}
+
+	setUpdateStage("persisting", "")
+	if err := runLoggedCommand(60*time.Second, "set -euo pipefail\nmkdir -p /config/persist/root/.opencode\nrsync -a --delete /root/.opencode/ /config/persist/root/.opencode/", ""); err != nil {
+		setUpdateVersion("after", currentOpenCodeVersion())
+		setUpdateDone("failed", "", err)
+		return
+	}
+
+	setUpdateStage("restarting", "")
+	if err := runLoggedCommand(60*time.Second, "set -euo pipefail\necho \"Restarting opencode-server...\"\nsupervisorctl restart opencode-server", ""); err != nil {
+		setUpdateVersion("after", currentOpenCodeVersion())
+		setUpdateDone("failed", "", err)
+		return
+	}
+
+	setUpdateStage("verifying", "")
+	verifyScript := "set -euo pipefail\nfor i in $(seq 1 60); do code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:${OPENCODE_SERVER_PORT:-4096}/ 2>/dev/null || true); case \"$code\" in 2*|3*|4*) echo \"OpenCode server is responding with HTTP $code.\"; exit 0;; esac; echo \"Waiting for OpenCode server... ${i}/60\"; sleep 1; done\necho \"OpenCode server did not respond before timeout.\"\nexit 1"
+	if err := runLoggedCommand(90*time.Second, verifyScript, "OPENCODE_SERVER_PORT="+serverPortFromConfig(cfg)); err != nil {
+		setUpdateVersion("after", currentOpenCodeVersion())
+		setUpdateDone("failed", "", err)
+		return
+	}
+
+	after := currentOpenCodeVersion()
+	setUpdateVersion("after", after)
+	appendUpdateLog(fmt.Sprintf("Updated OpenCode: %s", fallback(after, "unknown")))
+	setUpdateDone("complete", "", nil)
+	return
+}
+
+type openCodeRelease struct {
+	Version   string
+	URL       string
+	Changelog string
+}
+
+func fetchLatestOpenCodeRelease() (openCodeRelease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/anomalyco/opencode/releases/latest", nil)
+	if err != nil {
+		return openCodeRelease{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "OpenCode-Plus-Updater/1.0")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return openCodeRelease{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return openCodeRelease{}, fmt.Errorf("GitHub release check failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&parsed); err != nil {
+		return openCodeRelease{}, err
+	}
+	version := strings.TrimPrefix(strings.TrimSpace(parsed.TagName), "v")
+	if version == "" {
+		return openCodeRelease{}, errors.New("latest release did not include a version tag")
+	}
+	return openCodeRelease{Version: version, URL: parsed.HTMLURL, Changelog: strings.TrimSpace(parsed.Body)}, nil
+}
+
+func versionsEqual(a, b string) bool {
+	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
+}
+
+func fallback(value, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
+}
+
+func runLoggedCommand(timeout time.Duration, script string, extraEnv string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-lc", script)
+	cmd.Env = os.Environ()
+	if strings.TrimSpace(extraEnv) != "" {
+		cmd.Env = append(cmd.Env, extraEnv)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	readPipe := func(prefix string, reader io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			if prefix != "" {
+				line = prefix + line
+			}
+			appendUpdateLog(line)
+		}
+	}
+	wg.Add(2)
+	go readPipe("", stdout)
+	go readPipe("", stderr)
+	wg.Wait()
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func currentOpenCodeVersion() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "opencode", "--version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func serverPortFromConfig(cfg config) string {
+	parsed, err := url.Parse(cfg.UpstreamURL)
+	if err != nil || parsed.Port() == "" {
+		return "4096"
+	}
+	return parsed.Port()
+}
+
+func setUpdateStage(stage, logText string) {
+	opencodeUpdate.mu.Lock()
+	defer opencodeUpdate.mu.Unlock()
+	opencodeUpdate.Stage = stage
+	if logText != "" {
+		opencodeUpdate.Log = logText
+	}
+}
+
+func setUpdateVersion(field, version string) {
+	opencodeUpdate.mu.Lock()
+	defer opencodeUpdate.mu.Unlock()
+	if field == "before" {
+		opencodeUpdate.Before = version
+	} else {
+		opencodeUpdate.After = version
+	}
+}
+
+func setLatestRelease(release openCodeRelease) {
+	opencodeUpdate.mu.Lock()
+	defer opencodeUpdate.mu.Unlock()
+	opencodeUpdate.Latest = release.Version
+	opencodeUpdate.ReleaseURL = release.URL
+	opencodeUpdate.Changelog = trimForStatus(release.Changelog, 4000)
+}
+
+func appendUpdateLog(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	opencodeUpdate.mu.Lock()
+	defer opencodeUpdate.mu.Unlock()
+	if opencodeUpdate.Log == "" {
+		opencodeUpdate.Log = line
+	} else {
+		opencodeUpdate.Log += "\n" + line
+	}
+	opencodeUpdate.Log = trimForStatus(opencodeUpdate.Log, 12000)
+}
+
+func trimForStatus(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[len(value)-max:]
+}
+
+func setUpdateDone(stage, logText string, err error) {
+	opencodeUpdate.mu.Lock()
+	defer opencodeUpdate.mu.Unlock()
+	opencodeUpdate.Running = false
+	opencodeUpdate.Stage = stage
+	opencodeUpdate.EndedAt = time.Now().UTC().Format(time.RFC3339)
+	if strings.TrimSpace(logText) != "" {
+		opencodeUpdate.Log = trimForStatus(logText, 12000)
+	}
+	if err != nil {
+		opencodeUpdate.Error = err.Error()
+		appendLine := err.Error()
+		if opencodeUpdate.Log == "" {
+			opencodeUpdate.Log = appendLine
+		} else {
+			opencodeUpdate.Log = trimForStatus(opencodeUpdate.Log+"\n"+appendLine, 12000)
+		}
+	}
+}
+
+func updateStatusSnapshotLocked() map[string]any {
+	return map[string]any{
+		"running":        opencodeUpdate.Running,
+		"stage":          opencodeUpdate.Stage,
+		"started_at":     opencodeUpdate.StartedAt,
+		"ended_at":       opencodeUpdate.EndedAt,
+		"before_version": opencodeUpdate.Before,
+		"latest_version": opencodeUpdate.Latest,
+		"after_version":  opencodeUpdate.After,
+		"release_url":    opencodeUpdate.ReleaseURL,
+		"changelog":      opencodeUpdate.Changelog,
+		"error":          opencodeUpdate.Error,
+		"log":            opencodeUpdate.Log,
 	}
 }
 

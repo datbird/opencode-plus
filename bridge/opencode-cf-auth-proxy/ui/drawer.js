@@ -4,11 +4,12 @@
 
   const STORAGE_KEY = "opencodePlusDrawerSettings";
   const OPENCODE_PLUS_VERSION = "local Docker build";
-  const OPENCODE_VERSION = "1.14.39";
+  const OPENCODE_VERSION = "checking...";
   const GITHUB_URL = "https://github.com/datbird/opencode-plus";
   const STALE_THINKING_VISIBLE_MS = 4 * 60 * 1000;
   const STALE_THINKING_QUIET_MS = 90 * 1000;
   const STALE_THINKING_CHECK_MS = 15 * 1000;
+  const STALE_THINKING_RETURN_REFRESH_MS = 2 * 60 * 1000;
   const STALE_THINKING_SNOOZE_MS = 10 * 60 * 1000;
   const RECOVERY_NOTICE_KEY_PREFIX = "opencodePlusRecoveryNoticeDismissed";
   const DEFAULT_SETTINGS = {
@@ -46,6 +47,8 @@
   const CONFIG_AREAS = [
     { id: "system", label: "OpenCode Plus Settings", description: "Gateway, statusline modules, vault encryption, and runtime preferences." },
     { id: "hidden", label: "OpenCode Hidden Settings", description: "Access persisted OpenCode settings that normally only live in config." },
+    { id: "soul", label: "Soul & Sync", description: "Database-backed Souls, synced skills, commands, tools, hooks, named spaces, and synced projects." },
+    { id: "mounts", label: "File Mounts", description: "Mount SSH/SFTP, SMB, and Google Drive folders into the current workspace." },
   ];
 
   function readSettings() {
@@ -93,6 +96,21 @@
     `;
     notice.querySelector(".ocp-stale-thinking__button--primary")?.addEventListener("click", () => window.location.reload());
     notice.querySelector(".ocp-stale-thinking__button:not(.ocp-stale-thinking__button--primary)")?.addEventListener("click", () => dismissStaleThinkingNotice(true));
+    document.documentElement.append(notice);
+  }
+
+  function showAutoRefreshNotice() {
+    if (document.querySelector(".ocp-stale-thinking")) return;
+    const notice = document.createElement("aside");
+    notice.className = "ocp-stale-thinking ocp-stale-thinking--refreshing";
+    notice.setAttribute("role", "status");
+    notice.innerHTML = `
+      <span class="ocp-drawer__mini-spinner" aria-hidden="true"></span>
+      <div class="ocp-stale-thinking__copy">
+        <strong>Refreshing stale OpenCode view</strong>
+        <span>This tab was idle while OpenCode showed Thinking. Reloading the view to catch up with the saved session.</span>
+      </div>
+    `;
     document.documentElement.append(notice);
   }
 
@@ -159,12 +177,51 @@
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
   }
 
+  function base64UrlEncode(value) {
+    const bytes = new TextEncoder().encode(value);
+    let binary = "";
+    bytes.forEach((byte) => binary += String.fromCharCode(byte));
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  }
+
+  function currentOpenCodeDirectory() {
+    const encoded = location.pathname.split("/").filter(Boolean)[0];
+    if (!encoded) return "/root/aiplayground";
+    try {
+      const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+      const binary = atob(padded);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const decoded = new TextDecoder().decode(bytes);
+      return decoded.startsWith("/") ? decoded : "/root/aiplayground";
+    } catch {
+      return "/root/aiplayground";
+    }
+  }
+
+  function syncOpenCodeAutoAcceptPreference(enabled) {
+    const key = "permission.v3";
+    let state = {};
+    try {
+      state = JSON.parse(localStorage.getItem(key) || "{}");
+    } catch {
+      state = {};
+    }
+    if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+    if (!state.autoAccept || typeof state.autoAccept !== "object" || Array.isArray(state.autoAccept)) state.autoAccept = {};
+    state.autoAccept[`${base64UrlEncode(currentOpenCodeDirectory())}/*`] = Boolean(enabled);
+    localStorage.setItem(key, JSON.stringify(state));
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(state), storageArea: localStorage }));
+  }
+
   function installStaleThinkingWatchdog() {
     if (window.__opencodePlusStaleThinkingWatchdogInstalled) return;
     window.__opencodePlusStaleThinkingWatchdogInstalled = true;
     let thinkingSince = 0;
     let lastAppMutation = Date.now();
     let lastRecoveryCheck = 0;
+    let hiddenSince = document.visibilityState === "hidden" ? Date.now() : 0;
+    let blurredSince = document.hasFocus?.() === false ? Date.now() : 0;
+    let autoRefreshQueued = false;
 
     const observer = new MutationObserver((mutations) => {
       if (mutations.every((mutation) => {
@@ -175,9 +232,17 @@
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
-    window.setInterval(() => {
-      if (document.visibilityState === "hidden") return;
+    function runThinkingWatchdog(fromReturn = false) {
+      if (document.visibilityState === "hidden") {
+        if (!hiddenSince) hiddenSince = Date.now();
+        return;
+      }
       const now = Date.now();
+      const hiddenFor = hiddenSince ? now - hiddenSince : 0;
+      const blurredFor = blurredSince ? now - blurredSince : 0;
+      const awayFor = Math.max(hiddenFor, blurredFor);
+      hiddenSince = 0;
+      blurredSince = 0;
       if (now - lastRecoveryCheck >= STALE_THINKING_CHECK_MS) {
         lastRecoveryCheck = now;
         fetchLatestSessionMessage(currentSessionId()).then((message) => {
@@ -192,9 +257,29 @@
         return;
       }
       if (!thinkingSince) thinkingSince = now;
+      if (fromReturn && !autoRefreshQueued && awayFor >= STALE_THINKING_RETURN_REFRESH_MS && now - lastAppMutation >= STALE_THINKING_QUIET_MS) {
+        autoRefreshQueued = true;
+        showAutoRefreshNotice();
+        window.setTimeout(() => window.location.reload(), 450);
+        return;
+      }
       if (window.__opencodePlusStaleThinkingSnoozedUntil > now) return;
       if (now - thinkingSince >= STALE_THINKING_VISIBLE_MS && now - lastAppMutation >= STALE_THINKING_QUIET_MS) showStaleThinkingNotice();
-    }, STALE_THINKING_CHECK_MS);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        hiddenSince = Date.now();
+        return;
+      }
+      runThinkingWatchdog(true);
+    });
+    window.addEventListener("blur", () => {
+      blurredSince = Date.now();
+    });
+    window.addEventListener("focus", () => runThinkingWatchdog(true));
+    window.addEventListener("pageshow", () => runThinkingWatchdog(true));
+    window.setInterval(() => runThinkingWatchdog(false), STALE_THINKING_CHECK_MS);
   }
 
   function writeSettings(settings) {
@@ -281,6 +366,47 @@
     } catch (error) {
       return `Gateway status unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
+  }
+
+  async function fetchGatewayInfo() {
+    const response = await fetch("/__opencode-plus/health", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function fetchSoulStatus() {
+    const response = await fetch("/__opencode-plus/soul/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  function formatSupportConsole(info) {
+    const rows = [
+      ["service", info?.service || "opencode-plus-ui-gateway"],
+      ["gateway", info?.ui_enabled ? "online" : "disabled"],
+      ["ui assets", info?.external_ui ? "external persisted assets" : "embedded assets"],
+      ["upstream", info?.upstream_url || "unknown"],
+    ];
+    const support = Array.isArray(info?.support) ? info.support : [];
+    support.forEach((item) => rows.push([item?.name || "unknown", item?.version || "unknown"]));
+    const width = rows.reduce((max, row) => Math.max(max, row[0].length), 0);
+    return rows.map(([name, value]) => `$ ${name.padEnd(width)} : ${value}`).join("\n");
+  }
+
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
   }
 
   async function fetchAuthStatus() {
@@ -415,6 +541,61 @@
     return response.json();
   }
 
+  async function updateOpenCode() {
+    const response = await fetch("/__opencode-plus/opencode/update", { method: "POST" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function checkOpenCodeUpdate() {
+    const response = await fetch("/__opencode-plus/opencode/update/check", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function fetchOpenCodeUpdateStatus() {
+    const response = await fetch("/__opencode-plus/opencode/update/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function fetchMounts() {
+    const response = await fetch("/__opencode-plus/mounts", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function createMount(payload) {
+    const response = await fetch("/__opencode-plus/mounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function mountAction(id, action) {
+    const response = await fetch(`/__opencode-plus/mounts/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function deleteMount(id) {
+    const response = await fetch(`/__opencode-plus/mounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   async function waitForOpenCodeRestartStatus(overlay) {
     const detail = overlay.querySelector(".ocp-drawer__restart-detail");
     const started = Date.now();
@@ -457,6 +638,144 @@
     }
     overlay.hidden = false;
     return overlay;
+  }
+
+  function showUpdateOverlay(root) {
+    let overlay = root.querySelector(".ocp-drawer__update-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "ocp-drawer__restart-overlay ocp-drawer__update-overlay";
+      overlay.innerHTML = `
+        <div class="ocp-drawer__restart-card ocp-drawer__update-card" role="status" aria-live="polite">
+          <span class="ocp-drawer__restart-spinner" aria-hidden="true"></span>
+          <strong>Updating OpenCode</strong>
+          <p class="ocp-drawer__restart-detail ocp-drawer__update-detail">Queueing update...</p>
+          <div class="ocp-drawer__update-version" hidden></div>
+          <div class="ocp-drawer__update-changelog" hidden></div>
+          <pre class="ocp-drawer__update-log" hidden></pre>
+          <div class="ocp-drawer__button-row ocp-drawer__update-actions">
+            <button type="button" class="ocp-drawer__button ocp-drawer__update-continue" hidden>Continue Upgrade</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__update-close" disabled>Close</button>
+          </div>
+        </div>
+      `;
+      root.append(overlay);
+      overlay.querySelector(".ocp-drawer__update-close")?.addEventListener("click", () => overlay.remove());
+    }
+    overlay.hidden = false;
+    overlay.querySelector(".ocp-drawer__restart-spinner")?.removeAttribute("hidden");
+    overlay.querySelector(".ocp-drawer__update-close")?.setAttribute("disabled", "");
+    return overlay;
+  }
+
+  function updateStatusText(status) {
+    const stage = status?.stage || "queued";
+    if (stage === "queued") return "Update queued...";
+    if (stage === "checking") return "Checking current and latest OpenCode versions...";
+    if (stage === "installing") return "Installing OpenCode. This can take a while; the gateway is still alive.";
+    if (stage === "persisting") return "Persisting updated OpenCode install so container recreates keep it...";
+    if (stage === "restarting") return "Restarting only opencode-server while OpenCode Plus stays online...";
+    if (stage === "verifying") return "Waiting for OpenCode server to respond again...";
+    if (stage === "up_to_date") return `OpenCode is already current${status.latest_version ? ` (${status.latest_version})` : ""}.`;
+    if (stage === "complete") return `OpenCode updated${status.after_version ? ` to ${status.after_version}` : ""}. Refreshing...`;
+    if (stage === "failed") return `Update failed: ${status.error || "unknown error"}`;
+    return "Updating OpenCode...";
+  }
+
+  async function waitForOpenCodeUpdateStatus(overlay) {
+    const detail = overlay.querySelector(".ocp-drawer__update-detail");
+    const version = overlay.querySelector(".ocp-drawer__update-version");
+    const changelog = overlay.querySelector(".ocp-drawer__update-changelog");
+    const log = overlay.querySelector(".ocp-drawer__update-log");
+    const close = overlay.querySelector(".ocp-drawer__update-close");
+    const spinner = overlay.querySelector(".ocp-drawer__restart-spinner");
+    const started = Date.now();
+    while (Date.now() - started < 360_000) {
+      try {
+        const response = await fetchOpenCodeUpdateStatus();
+        const status = response?.status || {};
+        if (detail) detail.textContent = updateStatusText(status);
+        if (version && (status.before_version || status.latest_version || status.after_version)) {
+          version.hidden = false;
+          version.textContent = `Current: ${status.before_version || "unknown"} | Latest: ${status.latest_version || "checking"}${status.after_version ? ` | Installed: ${status.after_version}` : ""}`;
+        }
+        if (changelog && status.changelog) {
+          changelog.hidden = false;
+          changelog.textContent = String(status.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 1600);
+        }
+        if (log && status.log) {
+          log.hidden = false;
+          log.textContent = String(status.log).slice(-4000);
+        }
+        if (status.stage === "up_to_date") {
+          spinner?.setAttribute("hidden", "");
+          close?.removeAttribute("disabled");
+          return;
+        }
+        if (status.stage === "complete") {
+          spinner?.setAttribute("hidden", "");
+          window.setTimeout(() => window.location.reload(), 900);
+          return;
+        }
+        if (status.stage === "failed") {
+          spinner?.setAttribute("hidden", "");
+          close?.removeAttribute("disabled");
+          return;
+        }
+      } catch (error) {
+        if (detail) detail.textContent = `Update status unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    }
+    if (detail) detail.textContent = "Update is still running or status timed out. Check OpenCode Plus logs if needed.";
+    close?.removeAttribute("disabled");
+  }
+
+  function renderUpdateCheck(overlay, check) {
+    const detail = overlay.querySelector(".ocp-drawer__update-detail");
+    const version = overlay.querySelector(".ocp-drawer__update-version");
+    const changelog = overlay.querySelector(".ocp-drawer__update-changelog");
+    const continueButton = overlay.querySelector(".ocp-drawer__update-continue");
+    const close = overlay.querySelector(".ocp-drawer__update-close");
+    const spinner = overlay.querySelector(".ocp-drawer__restart-spinner");
+
+    if (detail) {
+      detail.textContent = check.update_available
+        ? "An OpenCode update is available. Review the version and changelog, then continue when ready."
+        : "OpenCode is already current. No update is needed.";
+    }
+    if (version) {
+      version.hidden = false;
+      version.textContent = `Current: ${check.current_version || "unknown"} | Latest: ${check.latest_version || "unknown"}`;
+    }
+    if (changelog && check.changelog) {
+      changelog.hidden = false;
+      changelog.textContent = String(check.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 1600);
+    }
+    if (continueButton) continueButton.hidden = !check.update_available;
+    if (!check.update_available) spinner?.setAttribute("hidden", "");
+    close?.removeAttribute("disabled");
+  }
+
+  async function startOpenCodeUpdateFromOverlay(overlay, button) {
+    const detail = overlay.querySelector(".ocp-drawer__update-detail");
+    const close = overlay.querySelector(".ocp-drawer__update-close");
+    const continueButton = overlay.querySelector(".ocp-drawer__update-continue");
+    const spinner = overlay.querySelector(".ocp-drawer__restart-spinner");
+    if (continueButton) continueButton.hidden = true;
+    spinner?.removeAttribute("hidden");
+    close?.setAttribute("disabled", "");
+    if (detail) detail.textContent = "Starting OpenCode update...";
+    button.disabled = true;
+    try {
+      await updateOpenCode();
+      waitForOpenCodeUpdateStatus(overlay);
+    } catch (error) {
+      if (detail) detail.textContent = `Update failed to start: ${error instanceof Error ? error.message : String(error)}`;
+      close?.removeAttribute("disabled");
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function renderAuthStatus(root, status) {
@@ -713,7 +1032,6 @@
     const keyStatus = container.querySelector(".ocp-drawer__system-key-status");
     const generateButton = container.querySelector(".ocp-drawer__system-key-generate");
     const regenerateButton = container.querySelector(".ocp-drawer__system-key-regenerate");
-    const restartButton = container.querySelector(".ocp-drawer__opencode-restart");
     const moduleList = container.querySelector(".ocp-drawer__system-module-list");
     const nativeCollapsed = container.querySelector(".ocp-drawer__plus-native-collapsed");
     const drawerOpen = container.querySelector(".ocp-drawer__plus-drawer-open");
@@ -751,24 +1069,6 @@
       } catch (error) {
         if (keyStatus) keyStatus.textContent = `Key regeneration failed: ${error instanceof Error ? error.message : String(error)}`;
         regenerateButton.disabled = false;
-      }
-    });
-
-    restartButton?.addEventListener("click", async () => {
-      const confirmed = window.confirm("Restart only the OpenCode server process? OpenCode Plus will keep showing this page while the restart is queued.");
-      if (!confirmed) return;
-      const root = document.getElementById("opencode-plus-drawer");
-      const overlay = root ? showRestartOverlay(root) : null;
-      restartButton.disabled = true;
-      try {
-        await restartOpenCode();
-        if (overlay) waitForOpenCodeRestartStatus(overlay);
-      } catch (error) {
-        if (overlay) {
-          overlay.querySelector(".ocp-drawer__restart-detail").textContent = `Restart failed: ${error instanceof Error ? error.message : String(error)}`;
-          overlay.querySelector(".ocp-drawer__restart-close")?.removeAttribute("disabled");
-        }
-        restartButton.disabled = false;
       }
     });
 
@@ -825,15 +1125,46 @@
     });
   }
 
+  function wireUpdateButton(button) {
+    button?.addEventListener("click", async () => {
+      const root = document.getElementById("opencode-plus-drawer");
+      const overlay = root ? showUpdateOverlay(root) : null;
+      if (!overlay) return;
+      const detail = overlay.querySelector(".ocp-drawer__update-detail");
+      const close = overlay.querySelector(".ocp-drawer__update-close");
+      const continueButton = overlay.querySelector(".ocp-drawer__update-continue");
+      const log = overlay.querySelector(".ocp-drawer__update-log");
+      if (continueButton) continueButton.hidden = true;
+      if (log) log.hidden = true;
+      close?.setAttribute("disabled", "");
+      if (detail) detail.textContent = "Checking OpenCode releases...";
+      button.disabled = true;
+      try {
+        const check = await checkOpenCodeUpdate();
+        renderUpdateCheck(overlay, check);
+        if (continueButton) {
+          continueButton.onclick = () => startOpenCodeUpdateFromOverlay(overlay, continueButton);
+        }
+      } catch (error) {
+        if (detail) detail.textContent = `Update check failed: ${error instanceof Error ? error.message : String(error)}`;
+        close?.removeAttribute("disabled");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
+  function openUpdateOverlayWithCheck(root, check) {
+    const overlay = showUpdateOverlay(root);
+    renderUpdateCheck(overlay, check);
+    const continueButton = overlay.querySelector(".ocp-drawer__update-continue");
+    if (continueButton) {
+      continueButton.onclick = () => startOpenCodeUpdateFromOverlay(overlay, continueButton);
+    }
+  }
+
   function systemConfigMarkup() {
     return `
-      <div class="ocp-drawer__system-section">
-        <h4>OpenCode Server</h4>
-        <p class="ocp-drawer__field-detail">Restart the OpenCode server process without restarting the OpenCode Plus gateway.</p>
-        <div class="ocp-drawer__button-row">
-          <button type="button" class="ocp-drawer__button ocp-drawer__opencode-restart">Restart OpenCode</button>
-        </div>
-      </div>
       <div class="ocp-drawer__system-section">
         <h4>Gateway</h4>
         ${gatewayConfigMarkup()}
@@ -881,12 +1212,108 @@
           <input class="ocp-drawer__hidden-auto-accept" type="checkbox" disabled>
           <span>
             <strong>Always auto-accept permissions</strong>
-            <small>Persistently writes <code>permission: "allow"</code> to OpenCode config so approvals stay auto-accepted after server restarts.</small>
+            <small>Persists auto-accept by writing OpenCode permission config and syncing the WebUI preference for this workspace.</small>
           </span>
         </label>
         <p class="ocp-drawer__field-detail ocp-drawer__hidden-config-detail">Checking OpenCode config...</p>
       </div>
     `;
+  }
+
+  function soulSyncMarkup() {
+    return `
+      <p class="ocp-drawer__modal-intro">OpenCode Plus Soul Sync will use PocketBase as the source of truth and render normal OpenCode files like <code>AGENTS.md</code>, skills, commands, tools, and plugins.</p>
+      <div class="ocp-drawer__system-section">
+        <h4>Database</h4>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-db-status">Checking PocketBase...</p>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-schema-status">Checking schema...</p>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Deployment</h4>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-deployment-status">Checking deployment identity...</p>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Synced Features</h4>
+        <div class="ocp-drawer__soul-feature-list">
+          <p class="ocp-drawer__field-detail">Loading feature readiness...</p>
+        </div>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Synced Projects</h4>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-project-gate">Checking requirements...</p>
+        <div class="ocp-drawer__button-row">
+          <button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project" disabled title="Requires PocketBase connection and at least one named space.">Create Synced Project</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSoulStatus(container, status) {
+    const db = status?.pocketbase || {};
+    const deployment = status?.deployment || {};
+    const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
+    const schemaStatus = container.querySelector(".ocp-drawer__soul-schema-status");
+    const deploymentStatus = container.querySelector(".ocp-drawer__soul-deployment-status");
+    const featureList = container.querySelector(".ocp-drawer__soul-feature-list");
+    const projectGate = container.querySelector(".ocp-drawer__soul-project-gate");
+    const createProject = container.querySelector(".ocp-drawer__soul-create-project");
+
+    if (dbStatus) {
+      dbStatus.textContent = status?.enabled
+        ? `PocketBase ${db.connected ? "connected" : "unavailable"}: ${db.url || "not configured"}. ${db.connected ? "Sync prerequisites can be checked." : "Sync features remain disabled until the database is reachable."}`
+        : "Soul Sync database features are disabled; OpenCode continues normally.";
+    }
+    if (deploymentStatus) {
+      deploymentStatus.textContent = `This deployment: ${deployment.name || "unknown"} (${deployment.id || "unknown"}).`;
+    }
+    if (schemaStatus) {
+      if (!status?.enabled) {
+        schemaStatus.textContent = "Schema checks skipped because database sync is disabled.";
+      } else if (!db.connected) {
+        schemaStatus.textContent = "Schema checks skipped until PocketBase is reachable.";
+      } else if (status.schema_ready) {
+        schemaStatus.textContent = `Schema initialized. Named spaces configured: ${status.named_space_count || 0}.`;
+      } else {
+        schemaStatus.textContent = "Schema not initialized. Sync modules remain safely disabled.";
+      }
+    }
+    if (featureList) {
+      const features = status?.features || {};
+      featureList.innerHTML = Object.entries(features).map(([key, value]) => `
+        <div class="ocp-drawer__config-row">
+          <span class="ocp-drawer__config-copy">
+            <strong>${escapeHtml(key.replace(/_/g, " "))}</strong>
+            <small>${escapeHtml(value)}</small>
+          </span>
+        </div>
+      `).join("") || `<p class="ocp-drawer__field-detail">No synced features reported yet.</p>`;
+    }
+    if (projectGate) {
+      if (!db.connected) {
+        projectGate.textContent = "Create Synced Project is safely disabled because it requires PocketBase connection and at least one named space.";
+      } else if (!status.schema_ready) {
+        projectGate.textContent = "Create Synced Project is safely disabled until the Soul Sync schema is initialized.";
+      } else if (!status.named_space_count) {
+        projectGate.textContent = "Create Synced Project is safely disabled until at least one Named Space exists.";
+      } else {
+        projectGate.textContent = "Synced Project prerequisites are ready. Creation UI is coming next.";
+      }
+    }
+    if (createProject) {
+      createProject.disabled = true;
+      createProject.title = db.connected
+        ? "Next step: initialize Soul Sync schema and create a named space."
+        : "Requires PocketBase connection and at least one named space.";
+    }
+  }
+
+  async function setupSoulSyncControls(container) {
+    try {
+      renderSoulStatus(container, await fetchSoulStatus());
+    } catch (error) {
+      const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
+      if (dbStatus) dbStatus.textContent = `Soul Sync status unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   async function setupHiddenSettingsControls(container) {
@@ -897,6 +1324,7 @@
     try {
       const response = await fetchOpenCodeConfig();
       autoAccept.checked = Boolean(response?.config?.auto_accept_permissions);
+      if (autoAccept.checked) syncOpenCodeAutoAcceptPreference(true);
       if (detail) detail.textContent = `Config file: ${response?.config?.config_file || "OpenCode config"}. Restart OpenCode for server-loaded config changes to fully apply.`;
       autoAccept.disabled = false;
     } catch (error) {
@@ -909,12 +1337,173 @@
       try {
         const response = await updateOpenCodeConfig({ auto_accept_permissions: autoAccept.checked });
         autoAccept.checked = Boolean(response?.config?.auto_accept_permissions);
+        syncOpenCodeAutoAcceptPreference(autoAccept.checked);
         if (detail) detail.textContent = "Saved. Restart OpenCode for server-loaded config changes to fully apply.";
       } catch (error) {
         autoAccept.checked = !autoAccept.checked;
         if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
       } finally {
         autoAccept.disabled = false;
+      }
+    });
+  }
+
+  function mountStatusLabel(status) {
+    return String(status || "disconnected").replace(/_/g, " ");
+  }
+
+  function mountManagerMarkup() {
+    return `
+      <p class="ocp-drawer__modal-intro">Mount external files into <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>. Failed or unreachable mounts time out quickly and retry later when auto-reconnect is enabled.</p>
+      <div class="ocp-drawer__system-section">
+        <h4>Add Mount</h4>
+        <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
+          <label>
+            <span>Name</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-name" type="text" placeholder="NAS Main">
+          </label>
+          <label>
+            <span>Provider</span>
+            <select class="ocp-drawer__field ocp-drawer__mount-type">
+              <option value="ssh">SSH/SFTP</option>
+              <option value="smb">SMB</option>
+              <option value="google_drive">Google Drive</option>
+            </select>
+          </label>
+          <label>
+            <span>Host or rclone remote</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-host" type="text" placeholder="server.local">
+          </label>
+          <label>
+            <span>Remote path/share</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="/home/robert/project or share/path">
+          </label>
+          <label>
+            <span>Port</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-port" type="text" placeholder="22">
+          </label>
+          <label>
+            <span>Username</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-username" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Password</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-password" type="password" autocomplete="off">
+          </label>
+          <label>
+            <span>Private key</span>
+            <textarea class="ocp-drawer__field ocp-drawer__mount-private-key" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key"></textarea>
+          </label>
+          <label class="ocp-drawer__hidden-toggle">
+            <input class="ocp-drawer__mount-read-only" type="checkbox" checked>
+            <span><strong>Read-only</strong><small>Recommended until you are ready for agents to write to this remote.</small></span>
+          </label>
+          <label class="ocp-drawer__hidden-toggle">
+            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked>
+            <span><strong>Auto-reconnect</strong><small>Retry unreachable mounts later with backoff instead of blocking OpenCode.</small></span>
+          </label>
+          <div class="ocp-drawer__button-row">
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Mount</button>
+          </div>
+          <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">SSH/SFTP mounting is enabled first. SMB and Google Drive config/status are staged while provider mount commands are completed.</p>
+        </div>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Configured Mounts</h4>
+        <div class="ocp-drawer__mount-list">Loading mounts...</div>
+      </div>
+    `;
+  }
+
+  function renderMountList(container, mounts) {
+    const list = container.querySelector(".ocp-drawer__mount-list");
+    if (!list) return;
+    if (!Array.isArray(mounts) || mounts.length === 0) {
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No file mounts configured yet.</p>`;
+      return;
+    }
+    list.innerHTML = mounts.map((mount) => {
+      const state = mount.state || {};
+      const detail = state.last_error ? escapeHtml(shorten(state.last_error, 180)) : `Path: ${escapeHtml(mount.mount_path || "")}`;
+      const nextRetry = state.next_retry_at ? `<small>Next retry: ${escapeHtml(state.next_retry_at)}</small>` : "";
+      return `
+        <div class="ocp-drawer__config-row ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
+          <span class="ocp-drawer__config-copy">
+            <strong>${escapeHtml(mount.name || mount.id)} · ${escapeHtml(mount.type || "mount")} · ${escapeHtml(mountStatusLabel(state.status))}</strong>
+            <small>${detail}</small>
+            ${nextRetry}
+          </span>
+          <div class="ocp-drawer__button-row">
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="test">Test</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="connect">Connect</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__button--danger ocp-drawer__mount-delete">Delete</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function refreshMounts(container) {
+    const list = container.querySelector(".ocp-drawer__mount-list");
+    try {
+      const response = await fetchMounts();
+      renderMountList(container, response.mounts || []);
+    } catch (error) {
+      if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Mount status unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+    }
+  }
+
+  function setupMountManagerControls(container) {
+    refreshMounts(container);
+    container.querySelector(".ocp-drawer__mount-save")?.addEventListener("click", async () => {
+      const detail = container.querySelector(".ocp-drawer__mount-save-detail");
+      const type = container.querySelector(".ocp-drawer__mount-type")?.value || "ssh";
+      const name = container.querySelector(".ocp-drawer__mount-name")?.value || "";
+      const host = container.querySelector(".ocp-drawer__mount-host")?.value || "";
+      const remotePath = container.querySelector(".ocp-drawer__mount-path")?.value || "";
+      const port = container.querySelector(".ocp-drawer__mount-port")?.value || "";
+      const username = container.querySelector(".ocp-drawer__mount-username")?.value || "";
+      const password = container.querySelector(".ocp-drawer__mount-password")?.value || "";
+      const privateKey = container.querySelector(".ocp-drawer__mount-private-key")?.value || "";
+      const readOnly = Boolean(container.querySelector(".ocp-drawer__mount-read-only")?.checked);
+      const autoReconnect = Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
+      if (detail) detail.textContent = "Saving mount...";
+      try {
+        await createMount({
+          name,
+          type,
+          workspace_root: currentOpenCodeDirectory(),
+          mount_name: name,
+          remote: { host, path: remotePath, share: remotePath, port, username },
+          options: { read_only: readOnly, auto_connect: false, auto_reconnect: autoReconnect },
+          secret: { username, password, private_key: privateKey },
+        });
+        if (detail) detail.textContent = "Saved. Use Test or Connect below; unreachable mounts will retry later if enabled.";
+        await refreshMounts(container);
+      } catch (error) {
+        if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    });
+    container.addEventListener("click", async (event) => {
+      const row = event.target?.closest?.(".ocp-drawer__mount-row");
+      if (!row) return;
+      const id = row.dataset.mountId;
+      if (!id) return;
+      const actionButton = event.target.closest?.(".ocp-drawer__mount-action");
+      const deleteButton = event.target.closest?.(".ocp-drawer__mount-delete");
+      try {
+        if (deleteButton) {
+          if (!window.confirm("Delete this mount configuration? The remote files will not be deleted.")) return;
+          await deleteMount(id);
+        } else if (actionButton) {
+          await mountAction(id, actionButton.dataset.action);
+        } else {
+          return;
+        }
+        await refreshMounts(container);
+      } catch (error) {
+        window.alert(`Mount action failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
   }
@@ -1010,6 +1599,7 @@
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
+    modal.classList.remove("ocp-drawer__modal--help");
     title.textContent = `Configure ${module.label}`;
 
     if (module.id === "openai" || module.id === "openrouter" || module.id === "gemini" || module.id === "claude" || module.id === "xai") {
@@ -1081,6 +1671,7 @@
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
+    modal.classList.remove("ocp-drawer__modal--help");
     title.textContent = area.label;
 
     if (area.id === "restart") {
@@ -1101,6 +1692,12 @@
     } else if (area.id === "hidden") {
       body.innerHTML = hiddenSettingsMarkup(settings);
       setupHiddenSettingsControls(body);
+    } else if (area.id === "soul") {
+      body.innerHTML = soulSyncMarkup();
+      setupSoulSyncControls(body);
+    } else if (area.id === "mounts") {
+      body.innerHTML = mountManagerMarkup();
+      setupMountManagerControls(body);
     } else {
       body.innerHTML = `<p class="ocp-drawer__empty-config">No configuration is available for ${area.label} yet.</p>`;
     }
@@ -1113,6 +1710,7 @@
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
+    modal.classList.add("ocp-drawer__modal--help");
     title.textContent = "OpenCode Plus Help";
     body.innerHTML = `
       <div class="ocp-drawer__about">
@@ -1124,18 +1722,65 @@
           </div>
           <div>
             <dt>OpenCode</dt>
-            <dd>${escapeHtml(OPENCODE_VERSION)}</dd>
+            <dd class="ocp-drawer__about-opencode-row">
+              <span class="ocp-drawer__mini-spinner ocp-drawer__about-version-spinner" aria-hidden="true"></span>
+              <span class="ocp-drawer__about-opencode-version">${escapeHtml(OPENCODE_VERSION)}</span>
+              <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__about-update" hidden>Update Now</button>
+            </dd>
           </div>
           <div>
             <dt>Repository</dt>
             <dd><a href="${GITHUB_URL}" target="_blank" rel="noopener noreferrer">github.com/datbird/opencode-plus</a></dd>
           </div>
         </dl>
-        <p class="ocp-drawer__field-detail">This project is unofficial and is not affiliated with or endorsed by the upstream OpenCode project.</p>
+        <div class="ocp-drawer__about-console-wrap">
+          <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__about-copy">Copy</button>
+          <pre class="ocp-drawer__about-console"><span class="ocp-drawer__mini-spinner" aria-hidden="true"></span> $ loading support package versions...</pre>
+        </div>
+        <p class="ocp-drawer__field-detail">OpenCode Plus is an unofficial local enhancement layer. It is not part of, affiliated with, sponsored by, or endorsed by the upstream OpenCode project.</p>
       </div>
     `;
     modal.hidden = false;
     modal.querySelector(".ocp-drawer__modal-close").focus();
+    Promise.allSettled([fetchGatewayInfo(), checkOpenCodeUpdate()])
+      .then(([infoResult, checkResult]) => {
+        const info = infoResult.status === "fulfilled" ? infoResult.value : null;
+        body.querySelector(".ocp-drawer__about-version-spinner")?.remove();
+        const version = body.querySelector(".ocp-drawer__about-opencode-version");
+        if (version) {
+          version.textContent = info?.opencode_version || (infoResult.status === "rejected" ? `unavailable: ${infoResult.reason instanceof Error ? infoResult.reason.message : String(infoResult.reason)}` : "unknown");
+        }
+        const consoleView = body.querySelector(".ocp-drawer__about-console");
+        if (consoleView) {
+          consoleView.textContent = info ? formatSupportConsole(info) : `$ support info unavailable: ${infoResult.reason instanceof Error ? infoResult.reason.message : String(infoResult.reason)}`;
+        }
+
+        const updateButton = body.querySelector(".ocp-drawer__about-update");
+        if (checkResult.status === "fulfilled") {
+          const check = checkResult.value;
+          if (version && !check.update_available) version.textContent = `${check.current_version || info?.opencode_version || "unknown"} (current)`;
+          if (updateButton) {
+            updateButton.hidden = !check.update_available;
+            updateButton.onclick = () => openUpdateOverlayWithCheck(root, check);
+          }
+        } else if (version) {
+          version.textContent = `${version.textContent} (update check unavailable)`;
+        }
+
+        const copyButton = body.querySelector(".ocp-drawer__about-copy");
+        if (copyButton && consoleView) {
+          copyButton.onclick = async () => {
+            const original = copyButton.textContent;
+            try {
+              await copyTextToClipboard(consoleView.textContent || "");
+              copyButton.textContent = "Copied";
+            } catch (error) {
+              copyButton.textContent = "Copy failed";
+            }
+            window.setTimeout(() => copyButton.textContent = original, 1200);
+          };
+        }
+      });
   }
 
   function closeModuleConfig(root) {
@@ -1232,7 +1877,7 @@
           <h2>OpenCode Plus Controls</h2>
         </div>
         <div class="ocp-drawer__header-actions">
-          <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__opencode-restart-header">Restart</button>
+          <button type="button" class="ocp-drawer__icon-button ocp-drawer__opencode-restart-header" aria-label="Restart OpenCode server" title="Restart OpenCode server">↻</button>
           <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
           <button type="button" class="ocp-drawer__close" aria-label="Close OpenCode Plus controls" title="Close">X</button>
         </div>
@@ -1252,7 +1897,7 @@
       <div class="ocp-drawer__modal-panel" role="dialog" aria-modal="true" aria-labelledby="ocp-drawer-modal-title">
         <div class="ocp-drawer__modal-header">
           <h3 id="ocp-drawer-modal-title" class="ocp-drawer__modal-title">Configure Module</h3>
-          <button type="button" class="ocp-drawer__modal-close" data-modal-close>Close</button>
+          <button type="button" class="ocp-drawer__close ocp-drawer__modal-close" aria-label="Close dialog" title="Close" data-modal-close>X</button>
         </div>
         <div class="ocp-drawer__modal-body"></div>
       </div>

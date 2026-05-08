@@ -48,7 +48,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 
 FROM ubuntu-base AS base
 
-ARG OPENCODE_VERSION=1.14.39
+ARG OPENCODE_VERSION=latest
 
 ENV HOME=/root \
     USER=root \
@@ -63,7 +63,9 @@ ENV HOME=/root \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-ce-cli \
     docker-compose-plugin \
+    cifs-utils \
     fd-find \
+    fuse3 \
     fzf \
     gh \
     git \
@@ -78,10 +80,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     openssl \
     python3 \
+    rclone \
     ripgrep \
     rsync \
     screen \
     sqlite3 \
+    sshfs \
     sshpass \
     supervisor \
     tmux \
@@ -116,7 +120,11 @@ COPY supervisor/opencode-plus-quota.conf /etc/supervisor/conf.d/opencode-plus-qu
 
 RUN chmod 0755 /usr/local/bin/opencode-* /usr/local/bin/container-entrypoint /usr/local/bin/opencode-cf-auth-proxy \
     && mkdir -p /config /data /root/.ssh /run/sshd /var/log/supervisor \
-    && curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path \
+    && if [[ "${OPENCODE_VERSION}" == "latest" || -z "${OPENCODE_VERSION}" ]]; then \
+         curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path; \
+       else \
+         curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path; \
+       fi \
     && ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode \
     && sed -i \
       -e 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' \

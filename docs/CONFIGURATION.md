@@ -21,6 +21,11 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_PLUS_ENHANCEMENT_MODE`: enables OpenCode Plus runtime behavior. Defaults to `true`. Set to `false` for a plain OpenCode server.
 - `OPENCODE_PLUS_UI_ENABLED`: injects OpenCode Plus browser UI assets through the gateway when set to `true`. Defaults to `false`.
 - `OPENCODE_PLUS_UI_ASSET_DIR`: optional live asset directory for `drawer.js` and `drawer.css`, useful for testing UI changes without rebuilding the image.
+- `OPENCODE_PLUS_MOUNTS_DIR`: persistent file mount configuration directory. Defaults to `/config/persist/opencode-plus-mounts`.
+- `OPENCODE_PLUS_SOUL_DB_ENABLED`: enables database-backed Soul Sync readiness checks. Defaults to `true`.
+- `OPENCODE_PLUS_SOUL_PB_URL`: PocketBase URL for Soul Sync metadata. Defaults to `http://pocketbase:8080`.
+- `OPENCODE_PLUS_DEPLOYMENT_ID`: stable deployment identity for DB-backed sync records. Set this explicitly for each container, such as `opencode1` or `opencode2`.
+- `OPENCODE_PLUS_DEPLOYMENT_NAME`: human-readable deployment name shown in the drawer. Set this explicitly with the same stable container identity unless a friendlier label is needed.
 - `TZ`: container timezone.
 
 ## Workspace Environment Variables
@@ -161,6 +166,35 @@ OPENCODE_PLUS_UI_ASSET_DIR=/config/persist/opencode-plus-ui
 ```
 
 Then edit `/config/persist/opencode-plus-ui/drawer.js` and `/config/persist/opencode-plus-ui/drawer.css`, refresh the browser, and avoid rebuilding the Docker image until the UI is ready to bake in.
+
+## Soul Sync
+
+Soul Sync is optional and gated. When PocketBase is unavailable or the schema is missing, OpenCode continues normally and synced features remain disabled.
+
+Set these environment variables when enabling the drawer's `Soul & Sync` status panel:
+
+```text
+OPENCODE_PLUS_SOUL_DB_ENABLED=true
+OPENCODE_PLUS_SOUL_PB_URL=http://pocketbase:8080
+OPENCODE_PLUS_DEPLOYMENT_ID=opencode1
+OPENCODE_PLUS_DEPLOYMENT_NAME=opencode1
+```
+
+Use a distinct stable `OPENCODE_PLUS_DEPLOYMENT_ID` for each OpenCode Plus container. Do not rely on Docker's generated hostname if containers may be recreated.
+
+The required PocketBase migration is tracked in:
+
+```text
+pb_migrations/202605080041_opencode_plus_soul_sync.js
+```
+
+The current schema creates metadata collections for deployments, Souls, Roles, small synced assets, Named Spaces, Synced Projects, deployment path mappings, and render history. It does not write `AGENTS.md`, skills, commands, tools, plugins, or project files by itself.
+
+## File Mounts
+
+File mount configuration is stored under `OPENCODE_PLUS_MOUNTS_DIR`. Mounts are constrained to a `mounts/<name>` child path below the current OpenCode workspace root.
+
+SSH/SFTP mounting is the first supported provider path. SMB and Google Drive records can be staged in the UI while provider-specific mount commands are completed.
 
 ## Optional Sync Services
 
