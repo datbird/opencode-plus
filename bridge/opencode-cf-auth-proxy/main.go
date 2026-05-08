@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -53,6 +54,8 @@ type config struct {
 	SoulPBURL           string
 	DeploymentID        string
 	DeploymentName      string
+	DeploymentIDStable  bool
+	SourceRepoDir       string
 }
 
 type plusConfig struct {
@@ -286,6 +289,8 @@ func loadConfig() (config, error) {
 		SoulPBURL:           strings.TrimRight(env("OPENCODE_PLUS_SOUL_PB_URL", "http://pocketbase:8080"), "/"),
 		DeploymentID:        env("OPENCODE_PLUS_DEPLOYMENT_ID", env("HOSTNAME", "opencode-plus")),
 		DeploymentName:      env("OPENCODE_PLUS_DEPLOYMENT_NAME", env("HOSTNAME", "OpenCode Plus")),
+		DeploymentIDStable:  strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_ID")) != "",
+		SourceRepoDir:       env("OPENCODE_PLUS_SOURCE_REPO_DIR", "/root/gitrepos/opencode-ubuntu-container"),
 	}
 
 	allowed := strings.Split(os.Getenv("ALLOWED_EMAILS"), ",")
@@ -616,21 +621,22 @@ func soulStatusHandler(cfg config) http.HandlerFunc {
 			"synced_projects": "not initialized",
 		}
 		status := map[string]any{
-			"ok": true,
-			"enabled": cfg.SoulDBEnabled,
-			"ready": false,
-			"state": mapBool(cfg.SoulDBEnabled, "checking", "disabled"),
-			"schema_ready": false,
+			"ok":                true,
+			"enabled":           cfg.SoulDBEnabled,
+			"ready":             false,
+			"state":             mapBool(cfg.SoulDBEnabled, "checking", "disabled"),
+			"schema_ready":      false,
 			"named_space_count": 0,
-			"deployment": map[string]string{
-				"id":   cfg.DeploymentID,
-				"name": cfg.DeploymentName,
-			},
+			"deployment":        deploymentStatus(cfg, r),
 			"pocketbase": map[string]any{
 				"url":       cfg.SoulPBURL,
 				"connected": false,
 			},
 			"features": features,
+			"deployments": map[string]any{
+				"registered": false,
+				"items":      []any{},
+			},
 		}
 		if !cfg.SoulDBEnabled {
 			status["state"] = "disabled"
@@ -656,8 +662,202 @@ func soulStatusHandler(cfg config) http.HandlerFunc {
 			"connected": connected,
 			"detail":    detail,
 		}
+		if connected && schemaReady {
+			status["deployments"] = syncDeploymentHeartbeat(cfg, r)
+		}
 		writeJSON(w, http.StatusOK, status)
 	}
+}
+
+func deploymentStatus(cfg config, r *http.Request) map[string]any {
+	hostname, _ := os.Hostname()
+	return map[string]any{
+		"id":               cfg.DeploymentID,
+		"name":             cfg.DeploymentName,
+		"stable_identity":  cfg.DeploymentIDStable,
+		"hostname":         hostname,
+		"url":              requestBaseURL(r),
+		"git_commit":       currentGitCommit(cfg.SourceRepoDir),
+		"opencode_version": currentOpenCodeVersion(),
+	}
+}
+
+type pocketBaseDeploymentRecord struct {
+	ID           string         `json:"id"`
+	DeploymentID string         `json:"deployment_id"`
+	Name         string         `json:"name"`
+	URL          string         `json:"url"`
+	Enabled      bool           `json:"enabled"`
+	Metadata     map[string]any `json:"metadata"`
+	Created      string         `json:"created"`
+	Updated      string         `json:"updated"`
+}
+
+func syncDeploymentHeartbeat(cfg config, r *http.Request) map[string]any {
+	result := map[string]any{
+		"registered": false,
+		"items":      []pocketBaseDeploymentRecord{},
+	}
+	metadata := deploymentStatus(cfg, r)
+	metadata["last_seen_at"] = time.Now().UTC().Format(time.RFC3339)
+	payload := map[string]any{
+		"deployment_id": cfg.DeploymentID,
+		"name":          cfg.DeploymentName,
+		"enabled":       true,
+		"metadata":      metadata,
+	}
+	record, err := findPocketBaseDeployment(cfg.SoulPBURL, cfg.DeploymentID)
+	if currentURL := requestBaseURL(r); currentURL != "" {
+		payload["url"] = currentURL
+		metadata["url"] = currentURL
+	} else if isUsableInstanceURL(record.URL) {
+		payload["url"] = record.URL
+		metadata["url"] = record.URL
+	} else {
+		payload["url"] = ""
+		metadata["url"] = ""
+	}
+	if err == nil && record.ID != "" {
+		err = patchPocketBaseRecord(cfg.SoulPBURL, "opcp_deployments", record.ID, payload)
+	} else if err == nil {
+		err = createPocketBaseRecord(cfg.SoulPBURL, "opcp_deployments", payload)
+	}
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	result["registered"] = true
+	items, err := listPocketBaseDeployments(cfg.SoulPBURL)
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	result["items"] = items
+	return result
+}
+
+func findPocketBaseDeployment(baseURL, deploymentID string) (pocketBaseDeploymentRecord, error) {
+	query := url.Values{}
+	query.Set("perPage", "1")
+	query.Set("filter", fmt.Sprintf("deployment_id=%q", strings.ReplaceAll(deploymentID, `"`, `\"`)))
+	var parsed struct {
+		Items []pocketBaseDeploymentRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_deployments", query, &parsed); err != nil {
+		return pocketBaseDeploymentRecord{}, err
+	}
+	if len(parsed.Items) == 0 {
+		return pocketBaseDeploymentRecord{}, nil
+	}
+	return parsed.Items[0], nil
+}
+
+func listPocketBaseDeployments(baseURL string) ([]pocketBaseDeploymentRecord, error) {
+	query := url.Values{}
+	query.Set("perPage", "50")
+	var parsed struct {
+		Items []pocketBaseDeploymentRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_deployments", query, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Items, nil
+}
+
+func getPocketBaseJSON(baseURL, collection string, query url.Values, target any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/collections/" + url.PathEscape(collection) + "/records"
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("PocketBase %s list failed: HTTP %d %s", collection, res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.Unmarshal(body, target)
+}
+
+func createPocketBaseRecord(baseURL, collection string, payload map[string]any) error {
+	return writePocketBaseRecord(http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records", payload)
+}
+
+func patchPocketBaseRecord(baseURL, collection, id string, payload map[string]any) error {
+	return writePocketBaseRecord(http.MethodPatch, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records/"+url.PathEscape(id), payload)
+}
+
+func writePocketBaseRecord(method, endpoint string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	resBody, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("PocketBase write failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(resBody)))
+	}
+	return nil
+}
+
+func requestBaseURL(r *http.Request) string {
+	if r == nil || r.Host == "" {
+		return ""
+	}
+	hostname := r.Host
+	if host, _, found := strings.Cut(r.Host, ":"); found {
+		hostname = host
+	}
+	if hostname == "localhost" || hostname == "127.0.0.1" || r.Host == "[::1]" || r.Host == "[::1]:4097" {
+		return ""
+	}
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = mapBool(r.TLS != nil, "https", "http")
+	}
+	return scheme + "://" + r.Host
+}
+
+func isUsableInstanceURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	hostname := parsed.Hostname()
+	return hostname != "localhost" && hostname != "127.0.0.1" && hostname != "::1"
+}
+
+func currentGitCommit(repoDir string) string {
+	repoDir = strings.TrimSpace(repoDir)
+	if repoDir == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func checkSoulSchema(baseURL string) (bool, map[string]any, int) {
@@ -1494,12 +1694,12 @@ func updateOpenCodeCheckHandler() http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":              true,
-			"current_version": current,
-			"latest_version":  release.Version,
+			"ok":               true,
+			"current_version":  current,
+			"latest_version":   release.Version,
 			"update_available": !versionsEqual(current, release.Version),
-			"release_url":     release.URL,
-			"changelog":       trimForStatus(release.Changelog, 4000),
+			"release_url":      release.URL,
+			"changelog":        trimForStatus(release.Changelog, 4000),
 		})
 	}
 }

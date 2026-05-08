@@ -177,6 +177,38 @@
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
   }
 
+  function formatRelativeTime(value) {
+    const timestamp = Date.parse(value || "");
+    if (!Number.isFinite(timestamp)) return "unknown";
+    const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 90) return `${seconds}s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
+  }
+
+  function deploymentLastSeen(deployment) {
+    return deployment?.metadata?.last_seen_at || deployment?.updated || deployment?.created || "";
+  }
+
+  function updateInstanceBadge(root, status) {
+    const deployment = status?.deployment || {};
+    const label = deployment.name || deployment.id || "unknown";
+    root.querySelectorAll(".ocp-drawer__instance-name").forEach((element) => {
+      element.textContent = label;
+    });
+    root.querySelectorAll(".ocp-drawer__instance-badge").forEach((element) => {
+      element.classList.toggle("ocp-drawer__instance-badge--unstable", deployment.stable_identity === false);
+      element.title = deployment.stable_identity === false
+        ? "This instance is using Docker hostname fallback. Set OPENCODE_PLUS_DEPLOYMENT_ID durably."
+        : "Stable OpenCode Plus deployment identity";
+    });
+    const handleInstance = root.querySelector(".ocp-drawer__handle-instance");
+    if (handleInstance) handleInstance.textContent = label;
+  }
+
   function base64UrlEncode(value) {
     const bytes = new TextEncoder().encode(value);
     let binary = "";
@@ -1231,6 +1263,15 @@
       <div class="ocp-drawer__system-section">
         <h4>Deployment</h4>
         <p class="ocp-drawer__field-detail ocp-drawer__soul-deployment-status">Checking deployment identity...</p>
+        <div class="ocp-drawer__instance-list">Loading known instances...</div>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>What Sync Means Today</h4>
+        <div class="ocp-drawer__sync-scope-list">
+          <div><strong>Shared via PocketBase:</strong> deployment heartbeat, schema readiness, metadata records.</div>
+          <div><strong>Local to this instance:</strong> OpenCode memory files, rendered files, secrets, browser state.</div>
+          <div><strong>Not active yet:</strong> automatic file rendering for <code>AGENTS.md</code>, skills, commands, tools, plugins, or projects.</div>
+        </div>
       </div>
       <div class="ocp-drawer__system-section">
         <h4>Synced Features</h4>
@@ -1254,6 +1295,7 @@
     const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
     const schemaStatus = container.querySelector(".ocp-drawer__soul-schema-status");
     const deploymentStatus = container.querySelector(".ocp-drawer__soul-deployment-status");
+    const instanceList = container.querySelector(".ocp-drawer__instance-list");
     const featureList = container.querySelector(".ocp-drawer__soul-feature-list");
     const projectGate = container.querySelector(".ocp-drawer__soul-project-gate");
     const createProject = container.querySelector(".ocp-drawer__soul-create-project");
@@ -1264,7 +1306,34 @@
         : "Soul Sync database features are disabled; OpenCode continues normally.";
     }
     if (deploymentStatus) {
-      deploymentStatus.textContent = `This deployment: ${deployment.name || "unknown"} (${deployment.id || "unknown"}).`;
+      const stableText = deployment.stable_identity === false ? "unstable Docker hostname fallback" : "stable identity";
+      const commit = deployment.git_commit ? ` Build ${deployment.git_commit}.` : "";
+      deploymentStatus.textContent = `This instance: ${deployment.name || "unknown"} (${deployment.id || "unknown"}) · ${stableText}.${commit}`;
+    }
+    if (instanceList) {
+      const deployments = Array.isArray(status?.deployments?.items) ? status.deployments.items : [];
+      if (!status?.deployments?.registered && status?.deployments?.error) {
+        instanceList.innerHTML = `<p class="ocp-drawer__field-detail">Instance heartbeat could not be written: ${escapeHtml(status.deployments.error)}</p>`;
+      } else if (!deployments.length) {
+        instanceList.innerHTML = `<p class="ocp-drawer__field-detail">No peer instances have checked in yet.</p>`;
+      } else {
+        instanceList.innerHTML = deployments.map((item) => {
+          const meta = item.metadata || {};
+          const isCurrent = item.deployment_id === deployment.id;
+          const stable = meta.stable_identity !== false;
+          const commit = meta.git_commit || "unknown build";
+          const seen = formatRelativeTime(deploymentLastSeen(item));
+          return `
+            <div class="ocp-drawer__instance-row ${isCurrent ? "ocp-drawer__instance-row--current" : ""}">
+              <span>
+                <strong>${escapeHtml(item.name || item.deployment_id || "unknown")}${isCurrent ? " · this instance" : ""}</strong>
+                <small>${escapeHtml(item.url || meta.url || "no URL recorded")} · ${escapeHtml(commit)} · seen ${escapeHtml(seen)}</small>
+              </span>
+              <em class="${stable ? "" : "ocp-drawer__sync-warn"}">${stable ? "stable" : "fix identity"}</em>
+            </div>
+          `;
+        }).join("");
+      }
     }
     if (schemaStatus) {
       if (!status?.enabled) {
@@ -1309,7 +1378,10 @@
 
   async function setupSoulSyncControls(container) {
     try {
-      renderSoulStatus(container, await fetchSoulStatus());
+      const status = await fetchSoulStatus();
+      renderSoulStatus(container, status);
+      const root = document.getElementById("opencode-plus-drawer");
+      if (root) updateInstanceBadge(root, status);
     } catch (error) {
       const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
       if (dbStatus) dbStatus.textContent = `Soul Sync status unavailable: ${error instanceof Error ? error.message : String(error)}`;
@@ -1864,7 +1936,7 @@
     const handle = document.createElement("button");
     handle.type = "button";
     handle.className = "ocp-drawer__handle";
-    handle.innerHTML = `<span class="ocp-drawer__handle-dot"></span><span class="ocp-drawer__handle-text">${settings.open ? "Hide OpenCode Plus" : "OpenCode Plus"}</span><span class="ocp-drawer__chevron">⌄</span>`;
+    handle.innerHTML = `<span class="ocp-drawer__handle-dot"></span><span class="ocp-drawer__handle-text">${settings.open ? "Hide OpenCode Plus" : "OpenCode Plus"}</span><span class="ocp-drawer__handle-instance">...</span><span class="ocp-drawer__chevron">⌄</span>`;
     handle.addEventListener("click", () => setOpen(root, settings, !settings.open));
     enableHandleDrag(root, handle, settings);
 
@@ -1875,6 +1947,7 @@
         <div>
           <div class="ocp-drawer__eyebrow">Enhancement Suite</div>
           <h2>OpenCode Plus Controls</h2>
+          <div class="ocp-drawer__instance-badge">Instance <strong class="ocp-drawer__instance-name">checking...</strong></div>
         </div>
         <div class="ocp-drawer__header-actions">
           <button type="button" class="ocp-drawer__icon-button ocp-drawer__opencode-restart-header" aria-label="Restart OpenCode server" title="Restart OpenCode server">↻</button>
@@ -1916,6 +1989,10 @@
     });
     root.append(panel, modal, handle);
     document.documentElement.append(root);
+    fetchSoulStatus().then((status) => updateInstanceBadge(root, status)).catch(() => {
+      const badge = root.querySelector(".ocp-drawer__instance-badge");
+      if (badge) badge.title = "Instance status unavailable";
+    });
     root.style.setProperty("--ocp-drawer-panel-height", `${panel.offsetHeight}px`);
     window.addEventListener("resize", () => {
       root.style.setProperty("--ocp-drawer-panel-height", `${panel.offsetHeight}px`);

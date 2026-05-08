@@ -88,6 +88,21 @@
   font-weight: 650;
 }
 
+.ocp-drawer__handle-instance {
+  background: rgba(53, 230, 208, 0.12);
+  border: 1px solid rgba(53, 230, 208, 0.2);
+  border-radius: 999px;
+  color: rgba(220, 255, 250, 0.86);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  max-width: 110px;
+  overflow: hidden;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ocp-drawer__chevron {
   color: var(--ocp-drawer-muted);
   font-size: 13px;
@@ -129,6 +144,25 @@
   font-size: 20px;
   font-weight: 720;
   margin-top: 3px;
+}
+
+.ocp-drawer__instance-badge {
+  align-items: center;
+  background: rgba(53, 230, 208, 0.09);
+  border: 1px solid rgba(53, 230, 208, 0.18);
+  border-radius: 999px;
+  color: rgba(220, 255, 250, 0.86);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 4px 9px;
+}
+
+.ocp-drawer__instance-badge--unstable {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.32);
+  color: rgba(255, 238, 202, 0.94);
 }
 
 .ocp-drawer__icon-button,
@@ -363,6 +397,70 @@
   color: var(--ocp-drawer-muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.ocp-drawer__instance-list,
+.ocp-drawer__sync-scope-list {
+  display: grid;
+  gap: 7px;
+}
+
+.ocp-drawer__instance-row,
+.ocp-drawer__sync-scope-list div {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  color: rgba(245, 245, 245, 0.78);
+  display: flex;
+  font-size: 12px;
+  gap: 10px;
+  justify-content: space-between;
+  line-height: 1.35;
+  padding: 8px 9px;
+}
+
+.ocp-drawer__sync-scope-list div {
+  align-items: flex-start;
+  display: block;
+}
+
+.ocp-drawer__instance-row--current {
+  border-color: rgba(53, 230, 208, 0.24);
+  background: rgba(53, 230, 208, 0.07);
+}
+
+.ocp-drawer__instance-row span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ocp-drawer__instance-row strong,
+.ocp-drawer__sync-scope-list strong {
+  color: rgba(245, 245, 245, 0.9);
+}
+
+.ocp-drawer__instance-row small {
+  color: var(--ocp-drawer-muted);
+  overflow-wrap: anywhere;
+}
+
+.ocp-drawer__instance-row em {
+  border: 1px solid rgba(53, 230, 208, 0.2);
+  border-radius: 999px;
+  color: rgba(220, 255, 250, 0.86);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 760;
+  padding: 3px 6px;
+  text-transform: uppercase;
+}
+
+.ocp-drawer__sync-warn {
+  border-color: rgba(245, 158, 11, 0.32) !important;
+  color: rgba(255, 238, 202, 0.94) !important;
 }
 
 .ocp-drawer__hidden-toggle {

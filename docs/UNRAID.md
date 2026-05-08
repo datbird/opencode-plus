@@ -129,3 +129,5 @@ OPENCODE_PLUS_DEPLOYMENT_NAME=opencode1
 For a second container, use `opencode2` for both deployment fields. These values must be durable in the Unraid template because Docker-generated hostnames can change when a container is recreated.
 
 Apply the PocketBase migration tracked in `pb_migrations/202605080041_opencode_plus_soul_sync.js` before enabling synced features. The drawer's `Soul & Sync` section should report `schema_ready:true` and will keep `Create Synced Project` disabled until at least one Named Space exists.
+
+The `Soul & Sync` panel writes only a small heartbeat row for the current instance to `opcp_deployments` and reads back peer rows. This is intended to make multi-instance state visible without enabling automatic file sync. If the panel marks an instance as `fix identity`, set the deployment ID/name variables durably in the Unraid template before recreating that container.

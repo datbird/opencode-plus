@@ -26,6 +26,7 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_PLUS_SOUL_PB_URL`: PocketBase URL for Soul Sync metadata. Defaults to `http://pocketbase:8080`.
 - `OPENCODE_PLUS_DEPLOYMENT_ID`: stable deployment identity for DB-backed sync records. Set this explicitly for each container, such as `opencode1` or `opencode2`.
 - `OPENCODE_PLUS_DEPLOYMENT_NAME`: human-readable deployment name shown in the drawer. Set this explicitly with the same stable container identity unless a friendlier label is needed.
+- `OPENCODE_PLUS_SOURCE_REPO_DIR`: local OpenCode Plus source repo used for the instance build/commit badge. Defaults to `/root/gitrepos/opencode-ubuntu-container`.
 - `TZ`: container timezone.
 
 ## Workspace Environment Variables
@@ -188,7 +189,7 @@ The required PocketBase migration is tracked in:
 pb_migrations/202605080041_opencode_plus_soul_sync.js
 ```
 
-The current schema creates metadata collections for deployments, Souls, Roles, small synced assets, Named Spaces, Synced Projects, deployment path mappings, and render history. It does not write `AGENTS.md`, skills, commands, tools, plugins, or project files by itself.
+The current schema creates metadata collections for deployments, Souls, Roles, small synced assets, Named Spaces, Synced Projects, deployment path mappings, and render history. The gateway writes a lightweight deployment heartbeat to `opcp_deployments` whenever `/__opencode-plus/soul/status` is requested, then reads peer deployment records back for the drawer's instance list. It does not write `AGENTS.md`, skills, commands, tools, plugins, or project files by itself.
 
 ## File Mounts
 

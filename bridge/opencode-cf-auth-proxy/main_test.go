@@ -227,3 +227,51 @@ func TestRetryAfterBacksOffAndCaps(t *testing.T) {
 		t.Fatalf("retry cap exceeded: %s", timeUntil)
 	}
 }
+
+func TestSyncDeploymentHeartbeatCreatesAndListsDeployment(t *testing.T) {
+	var records []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/api/collections/opcp_deployments/records") {
+			t.Fatalf("unexpected PocketBase path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"items": records})
+		case http.MethodPost:
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			payload["id"] = "rec1"
+			payload["created"] = "2026-05-08 00:00:00.000Z"
+			payload["updated"] = "2026-05-08 00:00:00.000Z"
+			records = append(records, payload)
+			writeJSON(w, http.StatusOK, payload)
+		case http.MethodPatch:
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config{
+		SoulPBURL:          server.URL,
+		DeploymentID:       "opencode-test",
+		DeploymentName:     "OpenCode Test",
+		DeploymentIDStable: true,
+		SourceRepoDir:      t.TempDir(),
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://opencode-test.example/__opencode-plus/soul/status", nil)
+	result := syncDeploymentHeartbeat(cfg, req)
+	if result["registered"] != true {
+		t.Fatalf("registered = %v, result = %#v", result["registered"], result)
+	}
+	items, ok := result["items"].([]pocketBaseDeploymentRecord)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want one deployment record", result["items"])
+	}
+	if items[0].DeploymentID != "opencode-test" || items[0].Name != "OpenCode Test" {
+		t.Fatalf("deployment record mismatch: %#v", items[0])
+	}
+}
