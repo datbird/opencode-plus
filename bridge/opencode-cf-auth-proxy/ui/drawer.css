@@ -1055,13 +1055,34 @@
 
 @media (max-width: 640px) {
   .ocp-drawer__handle {
+    box-sizing: border-box;
+    gap: 6px;
+    height: 40px;
     left: var(--ocp-drawer-handle-x, 50%);
-    max-width: 168px;
-    padding-left: 12px;
-    padding-right: 12px;
+    max-width: 142px;
+    min-height: 0;
+    padding: 3px 8px;
+  }
+
+  .ocp-drawer__handle-dot {
+    height: 5px;
+    width: 5px;
   }
 
   .ocp-drawer__handle-text {
+    font-size: 10px;
+    font-weight: 680;
+    line-height: 1;
+  }
+
+  .ocp-drawer__handle-instance {
+    font-size: 9px;
+    line-height: 1;
+    max-width: 58px;
+    padding: 1px 5px 2px;
+  }
+
+  .ocp-drawer__chevron {
     font-size: 11px;
   }
 
