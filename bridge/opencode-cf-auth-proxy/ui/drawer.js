@@ -177,6 +177,13 @@
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
   }
 
+  function formatOpenCodeVersionTransition(currentVersion, upgradeVersion, installedVersion = "") {
+    const current = currentVersion || "unknown";
+    const upgrade = upgradeVersion || "unknown";
+    const installed = installedVersion ? ` | Installed: ${installedVersion}` : "";
+    return `Current: ${current} | Upgrade: ${upgrade}${installed}`;
+  }
+
   function formatRelativeTime(value) {
     const timestamp = Date.parse(value || "");
     if (!Number.isFinite(timestamp)) return "unknown";
@@ -193,20 +200,42 @@
     return deployment?.metadata?.last_seen_at || deployment?.updated || deployment?.created || "";
   }
 
+  function instanceTooltip(deployment) {
+    const rows = [
+      ["Name", deployment.name],
+      ["ID", deployment.id],
+      ["Hostname", deployment.hostname],
+      ["OpenCode", deployment.opencode_version],
+      ["Commit", deployment.git_commit],
+      ["Identity", deployment.stable_identity === false ? "hostname fallback" : "stable"],
+      ["URL", deployment.url],
+    ];
+    return rows
+      .filter(([, value]) => value !== undefined && value !== null && String(value).trim())
+      .map(([label, value]) => `${label}: ${value}`)
+      .join("\n");
+  }
+
   function updateInstanceBadge(root, status) {
     const deployment = status?.deployment || {};
     const label = deployment.name || deployment.id || "unknown";
+    const tooltip = instanceTooltip(deployment) || "Instance information unavailable";
     root.querySelectorAll(".ocp-drawer__instance-name").forEach((element) => {
       element.textContent = label;
+      element.title = tooltip;
+      element.setAttribute("aria-label", tooltip);
     });
     root.querySelectorAll(".ocp-drawer__instance-badge").forEach((element) => {
       element.classList.toggle("ocp-drawer__instance-badge--unstable", deployment.stable_identity === false);
-      element.title = deployment.stable_identity === false
-        ? "This instance is using Docker hostname fallback. Set OPENCODE_PLUS_DEPLOYMENT_ID durably."
-        : "Stable OpenCode Plus deployment identity";
+      element.title = tooltip;
+      element.setAttribute("aria-label", tooltip);
     });
     const handleInstance = root.querySelector(".ocp-drawer__handle-instance");
-    if (handleInstance) handleInstance.textContent = label;
+    if (handleInstance) {
+      handleInstance.textContent = label;
+      handleInstance.title = tooltip;
+      handleInstance.setAttribute("aria-label", tooltip);
+    }
   }
 
   function base64UrlEncode(value) {
@@ -680,7 +709,7 @@
       overlay.innerHTML = `
         <div class="ocp-drawer__restart-card ocp-drawer__update-card" role="status" aria-live="polite">
           <span class="ocp-drawer__restart-spinner" aria-hidden="true"></span>
-          <strong>Updating OpenCode</strong>
+          <strong class="ocp-drawer__update-title">Updating OpenCode</strong>
           <p class="ocp-drawer__restart-detail ocp-drawer__update-detail">Queueing update...</p>
           <div class="ocp-drawer__update-version" hidden></div>
           <div class="ocp-drawer__update-changelog" hidden></div>
@@ -695,6 +724,8 @@
       overlay.querySelector(".ocp-drawer__update-close")?.addEventListener("click", () => overlay.remove());
     }
     overlay.hidden = false;
+    const title = overlay.querySelector(".ocp-drawer__update-title");
+    if (title) title.textContent = "Updating OpenCode";
     overlay.querySelector(".ocp-drawer__restart-spinner")?.removeAttribute("hidden");
     overlay.querySelector(".ocp-drawer__update-close")?.setAttribute("disabled", "");
     return overlay;
@@ -729,11 +760,11 @@
         if (detail) detail.textContent = updateStatusText(status);
         if (version && (status.before_version || status.latest_version || status.after_version)) {
           version.hidden = false;
-          version.textContent = `Current: ${status.before_version || "unknown"} | Latest: ${status.latest_version || "checking"}${status.after_version ? ` | Installed: ${status.after_version}` : ""}`;
+          version.textContent = formatOpenCodeVersionTransition(status.before_version, status.latest_version || "checking", status.after_version);
         }
         if (changelog && status.changelog) {
           changelog.hidden = false;
-          changelog.textContent = String(status.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 1600);
+          changelog.textContent = String(status.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 12000);
         }
         if (log && status.log) {
           log.hidden = false;
@@ -770,19 +801,25 @@
     const continueButton = overlay.querySelector(".ocp-drawer__update-continue");
     const close = overlay.querySelector(".ocp-drawer__update-close");
     const spinner = overlay.querySelector(".ocp-drawer__restart-spinner");
+    const title = overlay.querySelector(".ocp-drawer__update-title");
+
+    if (title) title.textContent = check.update_available ? "OpenCode Upgrade Available" : "OpenCode Is Current";
 
     if (detail) {
       detail.textContent = check.update_available
-        ? "An OpenCode update is available. Review the version and changelog, then continue when ready."
+        ? "Review the current and upgrade versions plus the changelog before continuing."
         : "OpenCode is already current. No update is needed.";
     }
     if (version) {
       version.hidden = false;
-      version.textContent = `Current: ${check.current_version || "unknown"} | Latest: ${check.latest_version || "unknown"}`;
+      version.textContent = formatOpenCodeVersionTransition(check.current_version, check.latest_version);
     }
     if (changelog && check.changelog) {
       changelog.hidden = false;
-      changelog.textContent = String(check.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 1600);
+      changelog.textContent = String(check.changelog).replace(/^##\s*Changelog\s*/i, "").trim().slice(0, 12000);
+    } else if (changelog) {
+      changelog.hidden = true;
+      changelog.textContent = "";
     }
     if (continueButton) continueButton.hidden = !check.update_available;
     if (!check.update_available) spinner?.setAttribute("hidden", "");
@@ -1797,6 +1834,7 @@
             <dd class="ocp-drawer__about-opencode-row">
               <span class="ocp-drawer__mini-spinner ocp-drawer__about-version-spinner" aria-hidden="true"></span>
               <span class="ocp-drawer__about-opencode-version">${escapeHtml(OPENCODE_VERSION)}</span>
+              <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__about-changelog" hidden>Changelog</button>
               <button type="button" class="ocp-drawer__button ocp-drawer__button--compact ocp-drawer__about-update" hidden>Update Now</button>
             </dd>
           </div>
@@ -1828,9 +1866,18 @@
         }
 
         const updateButton = body.querySelector(".ocp-drawer__about-update");
+        const changelogButton = body.querySelector(".ocp-drawer__about-changelog");
         if (checkResult.status === "fulfilled") {
           const check = checkResult.value;
-          if (version && !check.update_available) version.textContent = `${check.current_version || info?.opencode_version || "unknown"} (current)`;
+          if (version) {
+            version.textContent = check.update_available
+              ? formatOpenCodeVersionTransition(check.current_version || info?.opencode_version, check.latest_version)
+              : `${check.current_version || info?.opencode_version || "unknown"} (current)`;
+          }
+          if (changelogButton) {
+            changelogButton.hidden = !check.update_available || !check.changelog;
+            changelogButton.onclick = () => openUpdateOverlayWithCheck(root, check);
+          }
           if (updateButton) {
             updateButton.hidden = !check.update_available;
             updateButton.onclick = () => openUpdateOverlayWithCheck(root, check);

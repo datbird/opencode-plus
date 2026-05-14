@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1693,13 +1694,20 @@ func updateOpenCodeCheckHandler() http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "latest_version_check_failed", "detail": err.Error()})
 			return
 		}
+		if !versionsEqual(current, release.Version) {
+			if changelog, err := fetchOpenCodeReleaseChangelogSeries(current, release.Version); err == nil && strings.TrimSpace(changelog) != "" {
+				release.Changelog = changelog
+			} else if err != nil {
+				log.Printf("OpenCode changelog series unavailable: %v", err)
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":               true,
 			"current_version":  current,
 			"latest_version":   release.Version,
 			"update_available": !versionsEqual(current, release.Version),
 			"release_url":      release.URL,
-			"changelog":        trimForStatus(release.Changelog, 4000),
+			"changelog":        trimForStatus(release.Changelog, 16000),
 		})
 	}
 }
@@ -1735,6 +1743,12 @@ func runOpenCodeUpdate(cfg config) {
 		setUpdateVersion("after", before)
 		setUpdateDone("up_to_date", "", nil)
 		return
+	}
+	if changelog, err := fetchOpenCodeReleaseChangelogSeries(before, release.Version); err != nil {
+		appendUpdateLog(fmt.Sprintf("Release changelog series unavailable: %v", err))
+	} else if strings.TrimSpace(changelog) != "" {
+		release.Changelog = changelog
+		setLatestRelease(release)
 	}
 	appendUpdateLog(fmt.Sprintf("Preparing upgrade %s -> %s", fallback(before, "unknown"), release.Version))
 
@@ -1787,6 +1801,12 @@ type openCodeRelease struct {
 	Changelog string
 }
 
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+	HTMLURL string `json:"html_url"`
+	Body    string `json:"body"`
+}
+
 func fetchLatestOpenCodeRelease() (openCodeRelease, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1820,8 +1840,94 @@ func fetchLatestOpenCodeRelease() (openCodeRelease, error) {
 	return openCodeRelease{Version: version, URL: parsed.HTMLURL, Changelog: strings.TrimSpace(parsed.Body)}, nil
 }
 
+func fetchOpenCodeReleaseChangelogSeries(currentVersion, latestVersion string) (string, error) {
+	releases, err := fetchOpenCodeReleases(50)
+	if err != nil {
+		return "", err
+	}
+	var sections []string
+	for _, release := range releases {
+		if compareVersions(release.Version, currentVersion) <= 0 || compareVersions(release.Version, latestVersion) > 0 {
+			continue
+		}
+		body := strings.TrimSpace(release.Changelog)
+		if body == "" {
+			body = "No changelog was published for this release."
+		}
+		sections = append(sections, fmt.Sprintf("## OpenCode v%s\n\n%s", release.Version, body))
+	}
+	return strings.Join(sections, "\n\n"), nil
+}
+
+func fetchOpenCodeReleases(limit int) ([]openCodeRelease, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://api.github.com/repos/anomalyco/opencode/releases?per_page=%d", limit), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "OpenCode-Plus-Updater/1.0")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return nil, fmt.Errorf("GitHub release list failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed []githubRelease
+	if err := json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	releases := make([]openCodeRelease, 0, len(parsed))
+	for _, item := range parsed {
+		version := strings.TrimPrefix(strings.TrimSpace(item.TagName), "v")
+		if version == "" {
+			continue
+		}
+		releases = append(releases, openCodeRelease{Version: version, URL: item.HTMLURL, Changelog: strings.TrimSpace(item.Body)})
+	}
+	return releases, nil
+}
+
 func versionsEqual(a, b string) bool {
 	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
+}
+
+func compareVersions(a, b string) int {
+	aParts := parseVersionParts(a)
+	bParts := parseVersionParts(b)
+	for i := 0; i < len(aParts) && i < len(bParts); i++ {
+		if aParts[i] > bParts[i] {
+			return 1
+		}
+		if aParts[i] < bParts[i] {
+			return -1
+		}
+	}
+	return 0
+}
+
+func parseVersionParts(version string) [3]int {
+	var parts [3]int
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	version = strings.SplitN(version, "-", 2)[0]
+	for i, value := range strings.Split(version, ".") {
+		if i >= len(parts) {
+			break
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			continue
+		}
+		parts[i] = parsed
+	}
+	return parts
 }
 
 func fallback(value, fallback string) string {
@@ -1918,7 +2024,7 @@ func setLatestRelease(release openCodeRelease) {
 	defer opencodeUpdate.mu.Unlock()
 	opencodeUpdate.Latest = release.Version
 	opencodeUpdate.ReleaseURL = release.URL
-	opencodeUpdate.Changelog = trimForStatus(release.Changelog, 4000)
+	opencodeUpdate.Changelog = trimForStatus(release.Changelog, 16000)
 }
 
 func appendUpdateLog(line string) {

@@ -44,14 +44,16 @@
   background: rgba(18, 19, 21, 0.88);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 0 0 999px 999px;
+  box-sizing: border-box;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
   color: var(--ocp-drawer-text);
   cursor: pointer;
   display: flex;
   gap: 8px;
+  height: 40px;
   left: var(--ocp-drawer-handle-x, 72%);
   letter-spacing: 0.01em;
-  min-height: 28px;
+  min-height: 0;
   padding: 4px 14px 6px;
   pointer-events: auto;
   position: absolute;
@@ -778,8 +780,15 @@
   justify-content: flex-end;
 }
 
-.ocp-drawer__about-update {
+.ocp-drawer__about-update,
+.ocp-drawer__about-changelog {
   padding: 5px 8px;
+}
+
+.ocp-drawer__about-changelog {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.28);
+  color: rgba(220, 245, 255, 0.94);
 }
 
 .ocp-drawer__mini-spinner {
