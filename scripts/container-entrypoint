@@ -12,6 +12,18 @@ export OPENCODE_CF_AUTH_ENABLED="${OPENCODE_CF_AUTH_ENABLED:-false}"
 
 mkdir -p /config/logs "$OPENCODE_WORKSPACE_DIR" "$OPENCODE_REPOS_DIR" /var/log/supervisor
 
+ensure_persisted_ssh() {
+  mkdir -p /config/persist/root/.ssh
+  if [[ -d /root/.ssh && ! -L /root/.ssh ]]; then
+    rsync -a --ignore-existing /root/.ssh/ /config/persist/root/.ssh/ || true
+    rm -rf /root/.ssh
+  fi
+  ln -sfn /config/persist/root/.ssh /root/.ssh
+  chmod 700 /config/persist/root/.ssh 2>/dev/null || true
+  find /config/persist/root/.ssh -type f ! -name '*.pub' -exec chmod 600 {} + 2>/dev/null || true
+  find /config/persist/root/.ssh -type f -name '*.pub' -exec chmod 644 {} + 2>/dev/null || true
+}
+
 case "${OPENCODE_PLUS_ENHANCEMENT_MODE}" in
   true|TRUE|1|yes|YES) export OPENCODE_PLUS_ENHANCEMENT_MODE=true ;;
   false|FALSE|0|no|NO|"") export OPENCODE_PLUS_ENHANCEMENT_MODE=false ;;
@@ -19,7 +31,8 @@ case "${OPENCODE_PLUS_ENHANCEMENT_MODE}" in
 esac
 
 if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" ]]; then
-  mkdir -p /config/persist/root /root/.ssh /run/sshd
+  mkdir -p /config/persist/root /run/sshd
+  ensure_persisted_ssh
 
   if [[ ! -d /root/aiplayground || -L /root/aiplayground ]]; then
     ln -sfn "$OPENCODE_WORKSPACE_DIR" /root/aiplayground
@@ -34,7 +47,8 @@ if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" ]]; then
     for mounted_state_path in \
       .local/share/opencode \
       .config/opencode \
-      .cache/opencode; do
+      .cache/opencode \
+      .ssh; do
       if awk -v mount_point="/root/${mounted_state_path}" '$5 == mount_point { found = 1 } END { exit !found }' /proc/self/mountinfo; then
         rsync_excludes+=(--exclude="${mounted_state_path}/**")
       fi
@@ -42,8 +56,7 @@ if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" ]]; then
     rsync -a "${rsync_excludes[@]}" /config/persist/root/ /root/ || true
   fi
 
-  chmod 700 /root/.ssh 2>/dev/null || true
-  chmod 600 /root/.ssh/* 2>/dev/null || true
+  ensure_persisted_ssh
 fi
 
 if [[ "${OPENCODE_PLUS_ENHANCEMENT_MODE}" == "true" && -n "${ROOT_PASSWORD:-}" ]]; then
