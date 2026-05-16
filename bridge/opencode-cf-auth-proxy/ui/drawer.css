@@ -506,11 +506,34 @@
   display: none;
 }
 
+.ocp-drawer__mount-field--hidden {
+  display: none !important;
+}
+
 .ocp-drawer__credential-form label {
   color: rgba(245, 245, 245, 0.78);
   display: grid;
   font-size: 12px;
   gap: 6px;
+}
+
+.ocp-drawer__field-detail a {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ocp-drawer__mount-google-steps {
+  display: grid;
+  gap: 6px;
+}
+
+.ocp-drawer__mount-google-steps strong {
+  color: rgba(245, 245, 245, 0.88);
+}
+
+.ocp-drawer__mount-google-steps span {
+  display: block;
 }
 
 .ocp-drawer__field {

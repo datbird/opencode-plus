@@ -200,6 +200,9 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/opencode/update/check", updateOpenCodeCheckHandler())
 	mux.HandleFunc("/__opencode-plus/opencode/update", protectedHandler(auth, cfg, cache, updateOpenCodeHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/update/status", updateOpenCodeStatusHandler())
+	mux.HandleFunc("/__opencode-plus/mounts/google-drive/account", protectedHandler(auth, cfg, cache, googleDriveAccountHandler()))
+	mux.HandleFunc("/__opencode-plus/storage-providers", protectedHandler(auth, cfg, cache, mounts.ProviderCollectionHandler()))
+	mux.HandleFunc("/__opencode-plus/storage-providers/", protectedHandler(auth, cfg, cache, mounts.ProviderItemHandler()))
 	mux.HandleFunc("/__opencode-plus/mounts", protectedHandler(auth, cfg, cache, mounts.CollectionHandler()))
 	mux.HandleFunc("/__opencode-plus/mounts/", protectedHandler(auth, cfg, cache, mounts.ItemHandler()))
 	mux.HandleFunc("/__opencode-plus/quota", quotaHandler(cfg))
@@ -239,7 +242,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           corsMiddleware(mux),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
@@ -249,11 +252,32 @@ func main() {
 	}
 }
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Add("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, PATCH, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, x-requested-with")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func isPTYConnectRequest(path string) bool {
 	return strings.HasPrefix(path, "/pty/") && (strings.HasSuffix(path, "/connect-token") || strings.HasSuffix(path, "/connect"))
 }
 
 func prepareUpstreamRequest(r *http.Request, cfg config, cloudflareAuthEnabled bool) {
+	clientAuthorization := r.Header.Get("Authorization")
 	r.Header.Del("Accept-Encoding")
 	r.Header.Del("Authorization")
 	r.Header.Del("Cf-Access-Jwt-Assertion")
@@ -267,6 +291,8 @@ func prepareUpstreamRequest(r *http.Request, cfg config, cloudflareAuthEnabled b
 	}
 	if cloudflareAuthEnabled {
 		r.Header.Set("Authorization", cfg.BasicAuthValue)
+	} else if strings.TrimSpace(clientAuthorization) != "" {
+		r.Header.Set("Authorization", clientAuthorization)
 	}
 }
 

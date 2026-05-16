@@ -48,7 +48,8 @@
     { id: "system", label: "OpenCode Plus Settings", description: "Gateway, statusline modules, vault encryption, and runtime preferences." },
     { id: "hidden", label: "OpenCode Hidden Settings", description: "Access persisted OpenCode settings that normally only live in config." },
     { id: "soul", label: "Soul & Sync", description: "Database-backed Souls, synced skills, commands, tools, hooks, named spaces, and synced projects." },
-    { id: "mounts", label: "File Mounts", description: "Mount SSH/SFTP, SMB, and Google Drive folders into the current workspace." },
+    { id: "storage-providers", label: "Storage Providers", description: "Connect reusable storage accounts and servers." },
+    { id: "workspace-links", label: "Workspace Links", description: "Map connected storage into the current workspace." },
   ];
 
   function readSettings() {
@@ -626,9 +627,72 @@
     return response.json();
   }
 
+  async function fetchStorageProviders() {
+    const response = await fetch("/__opencode-plus/storage-providers", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function createStorageProvider(payload) {
+    const response = await fetch("/__opencode-plus/storage-providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function deleteStorageProvider(id) {
+    const response = await fetch(`/__opencode-plus/storage-providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function fetchGoogleDriveAccounts() {
+    const response = await fetch("/__opencode-plus/mounts/google-drive/account", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function connectGoogleDriveAccount(payload) {
+    const response = await fetch("/__opencode-plus/mounts/google-drive/account", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   async function createMount(payload) {
     const response = await fetch("/__opencode-plus/mounts", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get("content-type") || "";
+      const body = contentType.includes("application/json")
+        ? await response.json().catch(() => ({}))
+        : { detail: (await response.text().catch(() => "")).trim().slice(0, 180) };
+      throw new Error(body.detail || body.error || `${response.status} ${response.statusText || "request failed"}`);
+    }
+    return response.json();
+  }
+
+  async function updateMount(id, payload) {
+    const response = await fetch(`/__opencode-plus/mounts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
@@ -729,6 +793,38 @@
     overlay.querySelector(".ocp-drawer__restart-spinner")?.removeAttribute("hidden");
     overlay.querySelector(".ocp-drawer__update-close")?.setAttribute("disabled", "");
     return overlay;
+  }
+
+  function showWorkspaceLinkOverlay(root, titleText, detailText) {
+    let overlay = root.querySelector(".ocp-drawer__link-action-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "ocp-drawer__restart-overlay ocp-drawer__link-action-overlay";
+      overlay.innerHTML = `
+        <div class="ocp-drawer__restart-card ocp-drawer__link-action-card" role="status" aria-live="polite">
+          <span class="ocp-drawer__restart-spinner" aria-hidden="true"></span>
+          <strong class="ocp-drawer__link-action-title"></strong>
+          <p class="ocp-drawer__restart-detail ocp-drawer__link-action-detail"></p>
+          <button type="button" class="ocp-drawer__button ocp-drawer__link-action-close" disabled>Close</button>
+        </div>
+      `;
+      root.append(overlay);
+      overlay.querySelector(".ocp-drawer__link-action-close")?.addEventListener("click", () => overlay.remove());
+    }
+    overlay.hidden = false;
+    overlay.querySelector(".ocp-drawer__restart-spinner")?.removeAttribute("hidden");
+    overlay.querySelector(".ocp-drawer__link-action-close")?.setAttribute("disabled", "");
+    overlay.querySelector(".ocp-drawer__link-action-title").textContent = titleText;
+    overlay.querySelector(".ocp-drawer__link-action-detail").textContent = detailText;
+    return overlay;
+  }
+
+  function finishWorkspaceLinkOverlay(overlay, titleText, detailText) {
+    if (!overlay) return;
+    overlay.querySelector(".ocp-drawer__restart-spinner")?.setAttribute("hidden", "");
+    overlay.querySelector(".ocp-drawer__link-action-title").textContent = titleText;
+    overlay.querySelector(".ocp-drawer__link-action-detail").textContent = detailText;
+    overlay.querySelector(".ocp-drawer__link-action-close")?.removeAttribute("disabled");
   }
 
   function updateStatusText(status) {
@@ -1461,66 +1557,113 @@
     return String(status || "disconnected").replace(/_/g, " ");
   }
 
-  function mountManagerMarkup() {
+  function mountManagerMarkup(mode = "all") {
+    const showProviders = mode === "all" || mode === "providers";
+    const showLinks = mode === "all" || mode === "links";
     return `
-      <p class="ocp-drawer__modal-intro">Mount external files into <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>. Failed or unreachable mounts time out quickly and retry later when auto-reconnect is enabled.</p>
+      <p class="ocp-drawer__modal-intro">${showProviders && !showLinks ? "Connect reusable storage accounts and servers." : "Map connected storage into this workspace."}</p>
+      ${showProviders ? `
       <div class="ocp-drawer__system-section">
-        <h4>Add Mount</h4>
-        <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
-          <label>
-            <span>Name</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-name" type="text" placeholder="NAS Main">
+        <h4>Storage Providers</h4>
+        <div class="ocp-drawer__credential-form ocp-drawer__provider-form">
+          <label title="A friendly name for this reusable account or server. This name appears in Workspace Links.">
+            <span>Provider name</span>
+            <input class="ocp-drawer__field ocp-drawer__provider-name" type="text" placeholder="e.g. 'gdrive' or 'production-server'" title="A friendly name for this reusable account or server. This name appears in Workspace Links.">
           </label>
-          <label>
-            <span>Provider</span>
-            <select class="ocp-drawer__field ocp-drawer__mount-type">
+          <label title="The kind of storage connection to save. Provider-specific fields appear below.">
+            <span>Type</span>
+            <select class="ocp-drawer__field ocp-drawer__provider-type" title="The kind of storage connection to save. Provider-specific fields appear below.">
+              <option value="google_drive">Google Drive</option>
               <option value="ssh">SSH/SFTP</option>
               <option value="smb">SMB</option>
-              <option value="google_drive">Google Drive</option>
             </select>
           </label>
-          <label>
-            <span>Host or rclone remote</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-host" type="text" placeholder="server.local">
+          <label data-provider-field="host" title="Server hostname or IP address for this storage provider. Do not include a folder path here.">
+            <span>Host</span>
+            <input class="ocp-drawer__field ocp-drawer__provider-host" type="text" placeholder="server.local" title="Server hostname or IP address for this storage provider. Do not include a folder path here.">
           </label>
-          <label>
-            <span>Remote path/share</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="/home/robert/project or share/path">
-          </label>
-          <label>
+          <p class="ocp-drawer__field-detail ocp-drawer__provider-detail"></p>
+          <div class="ocp-drawer__credential-form ocp-drawer__provider-google-connect">
+            <div class="ocp-drawer__field-detail ocp-drawer__mount-google-steps">
+              <strong>Connect steps</strong>
+              <span>1. On your Device, install rclone if needed: <a href="https://rclone.org/downloads/" target="_blank" rel="noopener noreferrer">rclone downloads</a>.</span>
+              <span>2. Run this in Terminal or PowerShell: <code>rclone authorize "drive"</code></span>
+              <span>3. A Google login page opens. Sign in and allow access.</span>
+              <span>4. Copy the JSON block rclone prints, then paste it below.</span>
+              <span>If you see Google API quota errors, create your own Google OAuth Client ID/Secret and authorize with <code>rclone authorize "drive" CLIENT_ID CLIENT_SECRET</code>.</span>
+            </div>
+            <label title="Optional Google OAuth client ID. Only needed if the shared rclone Google app hits quota limits.">
+              <span>Google OAuth Client ID (optional)</span>
+              <input class="ocp-drawer__field ocp-drawer__provider-google-client-id" type="text" autocomplete="off" placeholder="Only needed if rclone default quota is exceeded" title="Optional Google OAuth client ID. Only needed if the shared rclone Google app hits quota limits.">
+            </label>
+            <label title="Optional Google OAuth client secret matching the client ID used to generate the token.">
+              <span>Google OAuth Client Secret (optional)</span>
+              <input class="ocp-drawer__field ocp-drawer__provider-google-client-secret" type="password" autocomplete="off" title="Optional Google OAuth client secret matching the client ID used to generate the token.">
+            </label>
+            <label title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider.">
+              <span>Authorization token JSON</span>
+              <textarea class="ocp-drawer__field ocp-drawer__provider-google-token" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"..."}' title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider."></textarea>
+            </label>
+          </div>
+          <label data-provider-field="port" title="Network port for SSH/SFTP. Leave blank to use the default port 22.">
             <span>Port</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-port" type="text" placeholder="22">
+            <input class="ocp-drawer__field ocp-drawer__provider-port" type="text" placeholder="22" title="Network port for SSH/SFTP. Leave blank to use the default port 22.">
           </label>
-          <label>
+          <label data-provider-field="username" title="Username for the storage account or server login.">
             <span>Username</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-username" type="text" autocomplete="off">
+            <input class="ocp-drawer__field ocp-drawer__provider-username" type="text" autocomplete="off" title="Username for the storage account or server login.">
           </label>
-          <label>
+          <label data-provider-field="password" title="Password for the storage account or server login. Leave blank if using an SSH private key.">
             <span>Password</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-password" type="password" autocomplete="off">
+            <input class="ocp-drawer__field ocp-drawer__provider-password" type="password" autocomplete="off" title="Password for the storage account or server login. Leave blank if using an SSH private key.">
           </label>
-          <label>
+          <label data-provider-field="private_key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password.">
             <span>Private key</span>
-            <textarea class="ocp-drawer__field ocp-drawer__mount-private-key" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key"></textarea>
-          </label>
-          <label class="ocp-drawer__hidden-toggle">
-            <input class="ocp-drawer__mount-read-only" type="checkbox" checked>
-            <span><strong>Read-only</strong><small>Recommended until you are ready for agents to write to this remote.</small></span>
-          </label>
-          <label class="ocp-drawer__hidden-toggle">
-            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked>
-            <span><strong>Auto-reconnect</strong><small>Retry unreachable mounts later with backoff instead of blocking OpenCode.</small></span>
+            <textarea class="ocp-drawer__field ocp-drawer__provider-private-key" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password."></textarea>
           </label>
           <div class="ocp-drawer__button-row">
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Mount</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__provider-save">Save Storage Provider</button>
           </div>
-          <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">SSH/SFTP mounting is enabled first. SMB and Google Drive config/status are staged while provider mount commands are completed.</p>
+          <p class="ocp-drawer__field-detail ocp-drawer__provider-save-detail">Storage providers save reusable account/server details only.</p>
         </div>
+        <div class="ocp-drawer__provider-list">Loading providers...</div>
       </div>
+      ` : ""}
+      ${showLinks ? `
       <div class="ocp-drawer__system-section">
-        <h4>Configured Mounts</h4>
+        <h4>Workspace Links</h4>
+        <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
+          <input class="ocp-drawer__mount-edit-id" type="hidden">
+          <label title="Choose one saved Storage Provider. The link will use that provider's saved account/server details.">
+            <span>Storage provider</span>
+            <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved Storage Provider. The link will use that provider's saved account/server details."></select>
+          </label>
+          <label title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
+            <span>Remote folder/path</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="opencode-plus or /home/robert/project" title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
+          </label>
+          <label title="Local folder name created under this workspace's mounts folder. Use a simple folder name, not a full path.">
+            <span>Local workspace folder</span>
+            <input class="ocp-drawer__field ocp-drawer__mount-name" type="text" placeholder="work-files" title="Local folder name created under this workspace's mounts folder. Use a simple folder name, not a full path.">
+          </label>
+          <p class="ocp-drawer__field-detail">Created under <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>.</p>
+          <label class="ocp-drawer__hidden-toggle" title="When enabled, agents should treat this linked storage as read-only where supported.">
+            <input class="ocp-drawer__mount-read-only" type="checkbox" checked title="When enabled, agents should treat this linked storage as read-only where supported.">
+            <span><strong>Read-only</strong><small>Recommended until you are ready for agents to write to this remote.</small></span>
+          </label>
+          <label class="ocp-drawer__hidden-toggle" title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
+            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
+            <span><strong>Auto-reconnect</strong><small>Retry unreachable links later with backoff.</small></span>
+          </label>
+          <div class="ocp-drawer__button-row">
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Workspace Link</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-cancel-edit ocp-drawer__mount-field--hidden">Cancel Edit</button>
+          </div>
+          <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">Choose a storage provider first.</p>
+        </div>
         <div class="ocp-drawer__mount-list">Loading mounts...</div>
       </div>
+      ` : ""}
     `;
   }
 
@@ -1533,19 +1676,26 @@
     }
     list.innerHTML = mounts.map((mount) => {
       const state = mount.state || {};
-      const detail = state.last_error ? escapeHtml(shorten(state.last_error, 180)) : `Path: ${escapeHtml(mount.mount_path || "")}`;
+      const remoteFolder = mount.remote?.path || mount.remote?.share || "";
+      const detail = state.last_error
+        ? escapeHtml(shorten(state.last_error, 180))
+        : `<small>Storage provider folder: ${escapeHtml(remoteFolder || "(root)")}</small><small>Local workspace folder: ${escapeHtml(mount.mount_path || "")}</small>`;
       const nextRetry = state.next_retry_at ? `<small>Next retry: ${escapeHtml(state.next_retry_at)}</small>` : "";
+      const isGoogleDrive = mount.type === "google_drive";
+      const connectLabel = isGoogleDrive ? "Sync" : "Connect";
+      const disconnectButton = isGoogleDrive ? "" : `<button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>`;
       return `
         <div class="ocp-drawer__config-row ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
           <span class="ocp-drawer__config-copy">
             <strong>${escapeHtml(mount.name || mount.id)} · ${escapeHtml(mount.type || "mount")} · ${escapeHtml(mountStatusLabel(state.status))}</strong>
-            <small>${detail}</small>
+            ${detail}
             ${nextRetry}
           </span>
           <div class="ocp-drawer__button-row">
             <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="test">Test</button>
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="connect">Connect</button>
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="connect">${connectLabel}</button>
+            ${disconnectButton}
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-edit">Edit</button>
             <button type="button" class="ocp-drawer__button ocp-drawer__button--danger ocp-drawer__mount-delete">Delete</button>
           </div>
         </div>
@@ -1553,60 +1703,331 @@
     }).join("");
   }
 
+  function renderStorageProviders(container, providers) {
+    const list = container.querySelector(".ocp-drawer__provider-list");
+    const select = container.querySelector(".ocp-drawer__mount-provider-select");
+    if (select) {
+      if (!Array.isArray(providers) || providers.length === 0) {
+        select.innerHTML = `<option value="">No storage providers configured</option>`;
+      } else {
+        select.innerHTML = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" data-provider-type="${escapeHtml(provider.type)}">${escapeHtml(provider.name)} · ${escapeHtml(provider.type)}</option>`).join("");
+      }
+    }
+    if (!list) return;
+    if (!Array.isArray(providers) || providers.length === 0) {
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No storage providers configured yet.</p>`;
+      return;
+    }
+    list.innerHTML = providers.map((provider) => `
+      <div class="ocp-drawer__config-row ocp-drawer__provider-row" data-provider-id="${escapeHtml(provider.id)}">
+        <span class="ocp-drawer__config-copy">
+          <strong>${escapeHtml(provider.name)} · ${escapeHtml(provider.type)}</strong>
+          <small>${escapeHtml(provider.remote?.host || provider.remote?.rclone_remote || provider.remote?.share || "Connected provider")}</small>
+        </span>
+        <div class="ocp-drawer__button-row">
+          <button type="button" class="ocp-drawer__button ocp-drawer__button--danger ocp-drawer__provider-delete">Delete</button>
+        </div>
+      </div>
+    `).join("");
+  }
+
+  async function refreshStorageProviders(container) {
+    const list = container.querySelector(".ocp-drawer__provider-list");
+    try {
+      const response = await fetchStorageProviders();
+      const providers = response.providers || [];
+      renderStorageProviders(container, providers);
+      return providers;
+    } catch (error) {
+      if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Storage providers unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+      return [];
+    }
+  }
+
+  function beginWorkspaceLinkEdit(container, mount) {
+    if (!mount) return;
+    const editId = container.querySelector(".ocp-drawer__mount-edit-id");
+    const nameInput = container.querySelector(".ocp-drawer__mount-name");
+    const pathInput = container.querySelector(".ocp-drawer__mount-path");
+    const readOnly = container.querySelector(".ocp-drawer__mount-read-only");
+    const autoReconnect = container.querySelector(".ocp-drawer__mount-auto-reconnect");
+    const saveButton = container.querySelector(".ocp-drawer__mount-save");
+    const cancelButton = container.querySelector(".ocp-drawer__mount-cancel-edit");
+    if (editId) editId.value = mount.id || "";
+    if (nameInput) nameInput.value = mount.name || "";
+    if (pathInput) pathInput.value = mount.remote?.path || mount.remote?.share || "";
+    if (readOnly) readOnly.checked = Boolean(mount.options?.read_only);
+    if (autoReconnect) autoReconnect.checked = Boolean(mount.options?.auto_reconnect);
+    if (saveButton) saveButton.textContent = "Update Workspace Link";
+    cancelButton?.classList.remove("ocp-drawer__mount-field--hidden");
+    const detail = container.querySelector(".ocp-drawer__mount-save-detail");
+    if (detail) detail.textContent = `Editing ${mount.name || mount.id}. Update the provider folder or local workspace folder, then save.`;
+  }
+
+  function clearWorkspaceLinkEdit(container) {
+    const editId = container.querySelector(".ocp-drawer__mount-edit-id");
+    if (editId) editId.value = "";
+    const saveButton = container.querySelector(".ocp-drawer__mount-save");
+    if (saveButton) saveButton.textContent = "Save Workspace Link";
+    container.querySelector(".ocp-drawer__mount-cancel-edit")?.classList.add("ocp-drawer__mount-field--hidden");
+  }
+
   async function refreshMounts(container) {
     const list = container.querySelector(".ocp-drawer__mount-list");
     try {
       const response = await fetchMounts();
-      renderMountList(container, response.mounts || []);
+      const mounts = response.mounts || [];
+      renderMountList(container, mounts);
+      return mounts;
     } catch (error) {
       if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Mount status unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+      return [];
+    }
+  }
+
+  async function refreshMountsUntilSettled(container, id) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const mounts = await refreshMounts(container);
+      const mount = mounts.find((item) => item.id === id);
+      const status = mount?.state?.status || "";
+      if (status && status !== "connecting") return;
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+    await refreshMounts(container);
+  }
+
+  function setMountFieldVisible(container, field, visible) {
+    container.querySelector(`[data-mount-field='${field}']`)?.classList.toggle("ocp-drawer__mount-field--hidden", !visible);
+  }
+
+  function setProviderFieldVisible(container, field, visible) {
+    container.querySelector(`[data-provider-field='${field}']`)?.classList.toggle("ocp-drawer__mount-field--hidden", !visible);
+  }
+
+  function updateStorageProviderFields(container) {
+    const type = container.querySelector(".ocp-drawer__provider-type")?.value || "google_drive";
+    const hostLabel = container.querySelector("[data-provider-field='host'] span");
+    const hostInput = container.querySelector(".ocp-drawer__provider-host");
+    const googleConnect = container.querySelector(".ocp-drawer__provider-google-connect");
+    const detail = container.querySelector(".ocp-drawer__provider-detail");
+    setProviderFieldVisible(container, "host", type !== "google_drive");
+    setProviderFieldVisible(container, "port", type === "ssh");
+    setProviderFieldVisible(container, "username", type === "ssh" || type === "smb");
+    setProviderFieldVisible(container, "password", type === "ssh" || type === "smb");
+    setProviderFieldVisible(container, "private_key", type === "ssh");
+    googleConnect?.classList.toggle("ocp-drawer__mount-field--hidden", type !== "google_drive");
+    if (type === "smb") {
+      if (hostLabel) hostLabel.textContent = "SMB host";
+      if (hostInput) hostInput.placeholder = "nas.local";
+      if (detail) detail.textContent = "Save the SMB server/account here. Choose the share path in Workspace Links.";
+    } else if (type === "ssh") {
+      if (hostLabel) hostLabel.textContent = "Host";
+      if (hostInput) hostInput.placeholder = "server.local";
+      if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the remote folder in Workspace Links.";
+    } else if (detail) {
+      detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Workspace Links.";
+    }
+  }
+
+  function updateMountProviderFields(container) {
+    const type = container.querySelector(".ocp-drawer__mount-type")?.value || "ssh";
+    const hostLabel = container.querySelector("[data-mount-field='host'] span");
+    const hostInput = container.querySelector(".ocp-drawer__mount-host");
+    const pathLabel = container.querySelector("[data-mount-field='path'] span");
+    const pathInput = container.querySelector(".ocp-drawer__mount-path");
+    const portInput = container.querySelector(".ocp-drawer__mount-port");
+    const providerDetail = container.querySelector(".ocp-drawer__mount-provider-detail");
+    const googleConnect = container.querySelector(".ocp-drawer__mount-google-connect");
+    const detail = container.querySelector(".ocp-drawer__mount-save-detail");
+
+    setMountFieldVisible(container, "host", true);
+    setMountFieldVisible(container, "path", true);
+    setMountFieldVisible(container, "port", type === "ssh");
+    setMountFieldVisible(container, "username", type === "ssh" || type === "smb");
+    setMountFieldVisible(container, "password", type === "ssh" || type === "smb");
+    setMountFieldVisible(container, "private_key", type === "ssh");
+    googleConnect?.classList.toggle("ocp-drawer__mount-field--hidden", type !== "google_drive");
+
+    if (type === "google_drive") {
+      if (hostLabel) hostLabel.textContent = "Google Drive Account";
+      if (hostInput) hostInput.placeholder = "gdrive";
+      if (pathLabel) pathLabel.textContent = "Remote Folder";
+      if (pathInput) pathInput.placeholder = "Projects/OpenCode";
+      if (providerDetail) providerDetail.textContent = "Use an existing connected account name, or connect a new account below.";
+      if (detail) detail.textContent = "Google Drive copies files from the remote folder into the local folder above. No Docker/FUSE mount is required.";
+    } else if (type === "smb") {
+      if (hostInput) hostInput.disabled = false;
+      if (hostLabel) hostLabel.textContent = "SMB host or rclone remote";
+      if (hostInput) hostInput.placeholder = "nas.local or smbremote";
+      if (pathLabel) pathLabel.textContent = "Share/path";
+      if (pathInput) pathInput.placeholder = "share/path";
+      if (providerDetail) providerDetail.textContent = "";
+      if (detail) detail.textContent = "SMB mounts use rclone when a remote name is provided; direct SMB probing checks port 445.";
+    } else {
+      if (hostInput) hostInput.disabled = false;
+      if (hostLabel) hostLabel.textContent = "Host";
+      if (hostInput) hostInput.placeholder = "server.local";
+      if (pathLabel) pathLabel.textContent = "Remote path";
+      if (pathInput) pathInput.placeholder = "/home/robert/project";
+      if (portInput && !portInput.value) portInput.placeholder = "22";
+      if (providerDetail) providerDetail.textContent = "";
+      if (detail) detail.textContent = "SSH/SFTP mounts use SSHFS and can authenticate with a password or private key.";
+    }
+  }
+
+  async function refreshGoogleDriveAccounts(container) {
+    const hostInput = container.querySelector(".ocp-drawer__mount-host");
+    const detail = container.querySelector(".ocp-drawer__mount-provider-detail");
+    try {
+      const response = await fetchGoogleDriveAccounts();
+      const accounts = Array.isArray(response.accounts) ? response.accounts : [];
+      if (accounts.length > 0) {
+        if (hostInput && !hostInput.value) hostInput.value = accounts[0];
+        if (detail) detail.textContent = `Connected Google Drive account${accounts.length === 1 ? "" : "s"}: ${accounts.join(", ")}`;
+      }
+    } catch (error) {
+      if (detail) detail.textContent = `Google Drive account status unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 
   function setupMountManagerControls(container) {
     refreshMounts(container);
+    refreshStorageProviders(container);
+    updateStorageProviderFields(container);
+    refreshGoogleDriveAccounts(container);
+    container.querySelector(".ocp-drawer__provider-type")?.addEventListener("change", () => updateStorageProviderFields(container));
+    container.querySelector(".ocp-drawer__provider-save")?.addEventListener("click", async () => {
+      const detail = container.querySelector(".ocp-drawer__provider-save-detail");
+      const type = container.querySelector(".ocp-drawer__provider-type")?.value || "google_drive";
+      const name = container.querySelector(".ocp-drawer__provider-name")?.value || "";
+      const host = container.querySelector(".ocp-drawer__provider-host")?.value || "";
+      const port = container.querySelector(".ocp-drawer__provider-port")?.value || "";
+      const username = container.querySelector(".ocp-drawer__provider-username")?.value || "";
+      const password = container.querySelector(".ocp-drawer__provider-password")?.value || "";
+      const privateKey = container.querySelector(".ocp-drawer__provider-private-key")?.value || "";
+      const token = container.querySelector(".ocp-drawer__provider-google-token")?.value || "";
+      const clientId = container.querySelector(".ocp-drawer__provider-google-client-id")?.value || "";
+      const clientSecret = container.querySelector(".ocp-drawer__provider-google-client-secret")?.value || "";
+      const remote = {};
+      const secret = {};
+      let providerName = name;
+      try {
+        if (type === "google_drive") {
+          providerName = name || "gdrive";
+          if (token.trim()) {
+            if (detail) detail.textContent = "Connecting Google Drive account...";
+            const response = await connectGoogleDriveAccount({ name: providerName, token, clientId, clientSecret });
+            providerName = response.account || providerName;
+          }
+          remote.rclone_remote = providerName;
+          remote.host = providerName;
+        } else if (type === "ssh") {
+          remote.host = host;
+          remote.port = port;
+          remote.username = username;
+          secret.username = username;
+          secret.password = password;
+          secret.private_key = privateKey;
+        } else if (type === "smb") {
+          remote.host = host;
+          remote.username = username;
+          secret.username = username;
+          secret.password = password;
+        }
+        if (detail) detail.textContent = "Saving storage provider...";
+        await createStorageProvider({ name: providerName, type, remote, secret });
+        container.querySelector(".ocp-drawer__provider-google-token").value = "";
+        container.querySelector(".ocp-drawer__provider-google-client-secret").value = "";
+        if (detail) detail.textContent = "Storage provider saved.";
+        await refreshStorageProviders(container);
+      } catch (error) {
+        if (detail) detail.textContent = `Provider save failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    });
     container.querySelector(".ocp-drawer__mount-save")?.addEventListener("click", async () => {
       const detail = container.querySelector(".ocp-drawer__mount-save-detail");
-      const type = container.querySelector(".ocp-drawer__mount-type")?.value || "ssh";
+      const providerSelect = container.querySelector(".ocp-drawer__mount-provider-select");
+      const providerId = providerSelect?.value || "";
+      const type = providerSelect?.selectedOptions?.[0]?.dataset?.providerType || "";
       const name = container.querySelector(".ocp-drawer__mount-name")?.value || "";
-      const host = container.querySelector(".ocp-drawer__mount-host")?.value || "";
       const remotePath = container.querySelector(".ocp-drawer__mount-path")?.value || "";
-      const port = container.querySelector(".ocp-drawer__mount-port")?.value || "";
-      const username = container.querySelector(".ocp-drawer__mount-username")?.value || "";
-      const password = container.querySelector(".ocp-drawer__mount-password")?.value || "";
-      const privateKey = container.querySelector(".ocp-drawer__mount-private-key")?.value || "";
       const readOnly = Boolean(container.querySelector(".ocp-drawer__mount-read-only")?.checked);
       const autoReconnect = Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
-      if (detail) detail.textContent = "Saving mount...";
+      const editId = container.querySelector(".ocp-drawer__mount-edit-id")?.value || "";
+      const remote = { path: remotePath, share: remotePath };
+      if (!providerId) {
+        if (detail) detail.textContent = "Save a storage provider first.";
+        return;
+      }
+      if (detail) detail.textContent = "Saving workspace link...";
       try {
-        await createMount({
+        const payload = {
           name,
           type,
+          provider_id: providerId,
           workspace_root: currentOpenCodeDirectory(),
           mount_name: name,
-          remote: { host, path: remotePath, share: remotePath, port, username },
+          remote,
           options: { read_only: readOnly, auto_connect: false, auto_reconnect: autoReconnect },
-          secret: { username, password, private_key: privateKey },
-        });
-        if (detail) detail.textContent = "Saved. Use Test or Connect below; unreachable mounts will retry later if enabled.";
+          secret: {},
+        };
+        if (editId) {
+          await updateMount(editId, payload);
+        } else {
+          await createMount(payload);
+        }
+        clearWorkspaceLinkEdit(container);
+        if (detail) detail.textContent = editId ? "Workspace link updated." : "Workspace link saved. Use Sync or Connect below.";
         await refreshMounts(container);
       } catch (error) {
         if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     });
+    container.querySelector(".ocp-drawer__mount-cancel-edit")?.addEventListener("click", () => {
+      clearWorkspaceLinkEdit(container);
+      container.querySelector(".ocp-drawer__mount-save-detail").textContent = "Choose a storage provider first.";
+    });
     container.addEventListener("click", async (event) => {
+      const providerRow = event.target?.closest?.(".ocp-drawer__provider-row");
+      if (providerRow && event.target.closest?.(".ocp-drawer__provider-delete")) {
+        if (!window.confirm("Delete this storage provider? Workspace links will not be deleted.")) return;
+        try {
+          await deleteStorageProvider(providerRow.dataset.providerId);
+          await refreshStorageProviders(container);
+        } catch (error) {
+          window.alert(`Provider delete failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return;
+      }
       const row = event.target?.closest?.(".ocp-drawer__mount-row");
       if (!row) return;
       const id = row.dataset.mountId;
       if (!id) return;
       const actionButton = event.target.closest?.(".ocp-drawer__mount-action");
+      const editButton = event.target.closest?.(".ocp-drawer__mount-edit");
       const deleteButton = event.target.closest?.(".ocp-drawer__mount-delete");
       try {
-        if (deleteButton) {
+        if (editButton) {
+          const mounts = await refreshMounts(container);
+          beginWorkspaceLinkEdit(container, mounts.find((item) => item.id === id));
+          return;
+        } else if (deleteButton) {
           if (!window.confirm("Delete this mount configuration? The remote files will not be deleted.")) return;
           await deleteMount(id);
         } else if (actionButton) {
-          await mountAction(id, actionButton.dataset.action);
+          const action = actionButton.dataset.action;
+          const label = action === "test" ? "Testing Workspace Link" : action === "connect" ? (actionButton.textContent.trim() || "Running Workspace Link") : "Updating Workspace Link";
+          const overlay = showWorkspaceLinkOverlay(document.querySelector("#opencode-plus-drawer"), label, action === "test" ? "Checking the provider and remote folder..." : "Starting the workspace link action...");
+          const result = await mountAction(id, action);
+          await refreshMountsUntilSettled(container, id);
+          if (action === "test") {
+            const status = result?.status || {};
+            const ok = result?.ok || status.status === "connected" || status.status === "synced";
+            finishWorkspaceLinkOverlay(overlay, ok ? "Test Passed" : "Test Failed", ok ? "The provider and remote folder are reachable." : (status.last_error || `Status: ${mountStatusLabel(status.status || "error")}`));
+          } else {
+            finishWorkspaceLinkOverlay(overlay, "Action Complete", "Workspace link status has been refreshed.");
+          }
+          return;
         } else {
           return;
         }
@@ -1804,8 +2225,11 @@
     } else if (area.id === "soul") {
       body.innerHTML = soulSyncMarkup();
       setupSoulSyncControls(body);
-    } else if (area.id === "mounts") {
-      body.innerHTML = mountManagerMarkup();
+    } else if (area.id === "storage-providers") {
+      body.innerHTML = mountManagerMarkup("providers");
+      setupMountManagerControls(body);
+    } else if (area.id === "workspace-links") {
+      body.innerHTML = mountManagerMarkup("links");
       setupMountManagerControls(body);
     } else {
       body.innerHTML = `<p class="ocp-drawer__empty-config">No configuration is available for ${area.label} yet.</p>`;
@@ -1912,7 +2336,7 @@
     const panel = root.querySelector(".ocp-drawer__panel");
     if (panel) root.style.setProperty("--ocp-drawer-panel-height", `${panel.offsetHeight}px`);
     root.classList.toggle("ocp-drawer--open", open);
-    root.querySelector(".ocp-drawer__handle-text").textContent = open ? "Hide OpenCode Plus" : "OpenCode Plus";
+    root.querySelector(".ocp-drawer__handle-text").textContent = "OpenCode Plus";
     writeSettings(settings);
   }
 
@@ -1983,7 +2407,7 @@
     const handle = document.createElement("button");
     handle.type = "button";
     handle.className = "ocp-drawer__handle";
-    handle.innerHTML = `<span class="ocp-drawer__handle-dot"></span><span class="ocp-drawer__handle-text">${settings.open ? "Hide OpenCode Plus" : "OpenCode Plus"}</span><span class="ocp-drawer__handle-instance">...</span><span class="ocp-drawer__chevron">⌄</span>`;
+    handle.innerHTML = `<span class="ocp-drawer__handle-dot"></span><span class="ocp-drawer__handle-text">OpenCode Plus</span><span class="ocp-drawer__handle-instance">...</span><span class="ocp-drawer__chevron">⌄</span>`;
     handle.addEventListener("click", () => setOpen(root, settings, !settings.open));
     enableHandleDrag(root, handle, settings);
 

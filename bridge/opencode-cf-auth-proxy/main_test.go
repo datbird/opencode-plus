@@ -129,6 +129,7 @@ func TestPrepareUpstreamRequestPreservesNormalOriginHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pty", nil)
 	req.Header.Set("Origin", "https://opencode2.crossmojonation.net")
 	req.Header.Set("Referer", "https://opencode2.crossmojonation.net/session")
+	req.Header.Set("Authorization", "Basic user-token")
 
 	prepareUpstreamRequest(req, config{}, false)
 
@@ -137,6 +138,34 @@ func TestPrepareUpstreamRequestPreservesNormalOriginHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("Referer"); got != "https://opencode2.crossmojonation.net/session" {
 		t.Fatalf("Referer header = %q, want preserved", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Basic user-token" {
+		t.Fatalf("Authorization header = %q, want client basic auth", got)
+	}
+}
+
+func TestCorsMiddlewareHandlesPreflight(t *testing.T) {
+	called := false
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/global/health", nil)
+	req.Header.Set("Origin", "https://opencode.crossmojonation.net")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("next handler was called for preflight")
+	}
+	if got := rec.Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://opencode.crossmojonation.net" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Private-Network = %q", got)
 	}
 }
 
