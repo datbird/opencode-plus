@@ -212,6 +212,40 @@ func TestMountPathValidationRequiresWorkspaceMountsChild(t *testing.T) {
 	}
 }
 
+func TestBuildRcloneMountCommandUsesDriveFriendlyDefaults(t *testing.T) {
+	cmd, cleanup, err := buildRcloneMountCommand(mountConfig{
+		MountPath: filepath.Join(t.TempDir(), "gdrive"),
+		Remote: map[string]string{
+			"rclone_remote": "gdrive",
+			"path":          "opencode-plus",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRcloneMountCommand() error = %v", err)
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+
+	args := strings.Join(cmd.Args, "\n")
+	for _, want := range []string{
+		"mount\ngdrive:opencode-plus",
+		"--vfs-cache-mode\nwrites",
+		"--dir-cache-time\n5m",
+		"--poll-interval\n1m",
+		"--drive-pacer-min-sleep\n200ms",
+		"--drive-pacer-burst\n10",
+		"--tpslimit\n4",
+		"--tpslimit-burst\n4",
+		"--retries\n1",
+		"--low-level-retries\n1",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("rclone args missing %q in %#v", want, cmd.Args)
+		}
+	}
+}
+
 func TestMountManagerCreateRedactsSecretsAndPersists(t *testing.T) {
 	dir := t.TempDir()
 	manager := newMountManager(config{MountsDir: dir})

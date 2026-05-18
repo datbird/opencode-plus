@@ -942,7 +942,7 @@ func buildRcloneMountCommand(config mountConfig) (*exec.Cmd, func(), error) {
 	if remotePath != "" {
 		remote += strings.TrimPrefix(remotePath, "/")
 	}
-	args := []string{"mount", remote, config.MountPath, "--vfs-cache-mode", "writes", "--cache-dir", rcloneCacheDir, "--dir-cache-time", "15m", "--poll-interval", "5m", "--drive-pacer-min-sleep", "200ms", "--drive-pacer-burst", "10", "--tpslimit", "4", "--tpslimit-burst", "4", "--retries", "1", "--low-level-retries", "1"}
+	args := []string{"mount", remote, config.MountPath, "--vfs-cache-mode", "writes", "--cache-dir", rcloneCacheDir, "--dir-cache-time", "5m", "--poll-interval", "1m", "--drive-pacer-min-sleep", "200ms", "--drive-pacer-burst", "10", "--tpslimit", "4", "--tpslimit-burst", "4", "--retries", "1", "--low-level-retries", "1"}
 	if config.Options.ReadOnly {
 		args = append(args, "--read-only")
 	}
