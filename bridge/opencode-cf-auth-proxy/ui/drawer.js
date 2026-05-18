@@ -1590,6 +1590,7 @@
               <span>2. Run this in Terminal or PowerShell: <code>rclone authorize "drive"</code></span>
               <span>3. A Google login page opens. Sign in and allow access.</span>
               <span>4. Copy the JSON block rclone prints, then paste it below.</span>
+              <span>Token-based Google Drive providers are manual-only: Workspace Links copy files locally only when you click <strong>Sync</strong>. They do not live-mount or auto-sync in the background.</span>
               <span>If you see Google API quota errors, create your own Google OAuth Client ID/Secret and authorize with <code>rclone authorize "drive" CLIENT_ID CLIENT_SECRET</code>.</span>
             </div>
             <label title="Optional Google OAuth client ID. Only needed if the shared rclone Google app hits quota limits.">
@@ -1600,9 +1601,9 @@
               <span>Google OAuth Client Secret (optional)</span>
               <input class="ocp-drawer__field ocp-drawer__provider-google-client-secret" type="password" autocomplete="off" title="Optional Google OAuth client secret matching the client ID used to generate the token.">
             </label>
-            <label title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider.">
+            <label title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider. Token-based Google Drive links are manual Sync only.">
               <span>Authorization token JSON</span>
-              <textarea class="ocp-drawer__field ocp-drawer__provider-google-token" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"..."}' title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider."></textarea>
+              <textarea class="ocp-drawer__field ocp-drawer__provider-google-token" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"..."}' title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider. Token-based Google Drive links are manual Sync only."></textarea>
             </label>
           </div>
           <label data-provider-field="port" title="Network port for SSH/SFTP. Leave blank to use the default port 22.">
@@ -1646,6 +1647,13 @@
             <span>Local workspace folder</span>
             <input class="ocp-drawer__field ocp-drawer__mount-name" type="text" placeholder="work-files" title="Local folder name created under this workspace's mounts folder. Use a simple folder name, not a full path.">
           </label>
+          <label data-mount-field="sync_mode" class="ocp-drawer__mount-field--hidden" title="Google Drive can be mounted live when the container has FUSE permissions, or copied manually as a fallback.">
+            <span>Google Drive mode</span>
+            <select class="ocp-drawer__field ocp-drawer__mount-sync-mode" title="Google Drive can be mounted live when the container has FUSE permissions, or copied manually as a fallback.">
+              <option value="mount">Live mount</option>
+              <option value="copy">Manual copy only</option>
+            </select>
+          </label>
           <p class="ocp-drawer__field-detail">Created under <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>.</p>
           <label class="ocp-drawer__hidden-toggle" title="When enabled, agents should treat this linked storage as read-only where supported.">
             <input class="ocp-drawer__mount-read-only" type="checkbox" checked title="When enabled, agents should treat this linked storage as read-only where supported.">
@@ -1653,7 +1661,7 @@
           </label>
           <label class="ocp-drawer__hidden-toggle" title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
             <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
-            <span><strong>Auto-reconnect</strong><small>Retry unreachable links later with backoff.</small></span>
+            <span><strong>Auto-reconnect</strong><small>Retry unreachable SSH/SMB links later. Disabled for token-based Google Drive manual Sync.</small></span>
           </label>
           <div class="ocp-drawer__button-row">
             <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Workspace Link</button>
@@ -1682,8 +1690,9 @@
         : `<small>Storage provider folder: ${escapeHtml(remoteFolder || "(root)")}</small><small>Local workspace folder: ${escapeHtml(mount.mount_path || "")}</small>`;
       const nextRetry = state.next_retry_at ? `<small>Next retry: ${escapeHtml(state.next_retry_at)}</small>` : "";
       const isGoogleDrive = mount.type === "google_drive";
-      const connectLabel = isGoogleDrive ? "Sync" : "Connect";
-      const disconnectButton = isGoogleDrive ? "" : `<button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>`;
+      const isGoogleDriveCopy = isGoogleDrive && mount.options?.sync_mode === "copy";
+      const connectLabel = isGoogleDriveCopy ? "Sync" : "Connect";
+      const disconnectButton = isGoogleDriveCopy ? "" : `<button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>`;
       return `
         <div class="ocp-drawer__config-row ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
           <span class="ocp-drawer__config-copy">
@@ -1737,6 +1746,7 @@
       const response = await fetchStorageProviders();
       const providers = response.providers || [];
       renderStorageProviders(container, providers);
+      updateWorkspaceLinkProviderFields(container);
       return providers;
     } catch (error) {
       if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Storage providers unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
@@ -1751,6 +1761,7 @@
     const pathInput = container.querySelector(".ocp-drawer__mount-path");
     const readOnly = container.querySelector(".ocp-drawer__mount-read-only");
     const autoReconnect = container.querySelector(".ocp-drawer__mount-auto-reconnect");
+    const syncMode = container.querySelector(".ocp-drawer__mount-sync-mode");
     const saveButton = container.querySelector(".ocp-drawer__mount-save");
     const cancelButton = container.querySelector(".ocp-drawer__mount-cancel-edit");
     if (editId) editId.value = mount.id || "";
@@ -1758,10 +1769,12 @@
     if (pathInput) pathInput.value = mount.remote?.path || mount.remote?.share || "";
     if (readOnly) readOnly.checked = Boolean(mount.options?.read_only);
     if (autoReconnect) autoReconnect.checked = Boolean(mount.options?.auto_reconnect);
+    if (syncMode) syncMode.value = mount.options?.sync_mode || "mount";
     if (saveButton) saveButton.textContent = "Update Workspace Link";
     cancelButton?.classList.remove("ocp-drawer__mount-field--hidden");
     const detail = container.querySelector(".ocp-drawer__mount-save-detail");
     if (detail) detail.textContent = `Editing ${mount.name || mount.id}. Update the provider folder or local workspace folder, then save.`;
+    updateWorkspaceLinkProviderFields(container);
   }
 
   function clearWorkspaceLinkEdit(container) {
@@ -1826,6 +1839,31 @@
       if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the remote folder in Workspace Links.";
     } else if (detail) {
       detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Workspace Links.";
+    }
+  }
+
+  function updateWorkspaceLinkProviderFields(container) {
+    const providerSelect = container.querySelector(".ocp-drawer__mount-provider-select");
+    const type = providerSelect?.selectedOptions?.[0]?.dataset?.providerType || "";
+    const autoReconnect = container.querySelector(".ocp-drawer__mount-auto-reconnect");
+    const syncMode = container.querySelector(".ocp-drawer__mount-sync-mode");
+    const mode = syncMode?.value || "mount";
+    const detail = container.querySelector(".ocp-drawer__mount-save-detail");
+    setMountFieldVisible(container, "sync_mode", type === "google_drive");
+    if (!autoReconnect) return;
+    if (type === "google_drive") {
+      autoReconnect.disabled = mode === "copy";
+      if (mode === "copy") autoReconnect.checked = false;
+      if (detail && !container.querySelector(".ocp-drawer__mount-edit-id")?.value) {
+        detail.textContent = mode === "copy"
+          ? "Manual copy only runs when you click Sync. It does not live-mount or auto-sync."
+          : "Live mount makes Google Drive appear as a local folder. It requires container FUSE/SYS_ADMIN permissions.";
+      }
+    } else {
+      autoReconnect.disabled = false;
+      if (detail && !container.querySelector(".ocp-drawer__mount-edit-id")?.value) {
+        detail.textContent = type ? "Save the workspace link, then use Test or Connect below." : "Choose a storage provider first.";
+      }
     }
   }
 
@@ -1896,6 +1934,8 @@
     updateStorageProviderFields(container);
     refreshGoogleDriveAccounts(container);
     container.querySelector(".ocp-drawer__provider-type")?.addEventListener("change", () => updateStorageProviderFields(container));
+    container.querySelector(".ocp-drawer__mount-provider-select")?.addEventListener("change", () => updateWorkspaceLinkProviderFields(container));
+    container.querySelector(".ocp-drawer__mount-sync-mode")?.addEventListener("change", () => updateWorkspaceLinkProviderFields(container));
     container.querySelector(".ocp-drawer__provider-save")?.addEventListener("click", async () => {
       const detail = container.querySelector(".ocp-drawer__provider-save-detail");
       const type = container.querySelector(".ocp-drawer__provider-type")?.value || "google_drive";
@@ -1952,7 +1992,8 @@
       const name = container.querySelector(".ocp-drawer__mount-name")?.value || "";
       const remotePath = container.querySelector(".ocp-drawer__mount-path")?.value || "";
       const readOnly = Boolean(container.querySelector(".ocp-drawer__mount-read-only")?.checked);
-      const autoReconnect = Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
+      const syncMode = type === "google_drive" ? (container.querySelector(".ocp-drawer__mount-sync-mode")?.value || "mount") : "";
+      const autoReconnect = type === "google_drive" && syncMode === "copy" ? false : Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
       const editId = container.querySelector(".ocp-drawer__mount-edit-id")?.value || "";
       const remote = { path: remotePath, share: remotePath };
       if (!providerId) {
@@ -1968,7 +2009,7 @@
           workspace_root: currentOpenCodeDirectory(),
           mount_name: name,
           remote,
-          options: { read_only: readOnly, auto_connect: false, auto_reconnect: autoReconnect },
+          options: { read_only: readOnly, auto_connect: false, auto_reconnect: autoReconnect, sync_mode: syncMode },
           secret: {},
         };
         if (editId) {

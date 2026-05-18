@@ -35,6 +35,7 @@ const (
 	mountStatusError        = "error"
 	mountStatusDisabled     = "disabled"
 	rcloneConfigFile        = "/config/persist/opencode-plus-mounts/rclone.conf"
+	rcloneCacheDir          = "/config/persist/opencode-plus-mounts/rclone-cache"
 )
 
 var safeMountNamePattern = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -84,6 +85,7 @@ type mountOptions struct {
 	ReadOnly      bool `json:"read_only"`
 	AutoConnect   bool `json:"auto_connect"`
 	AutoReconnect bool `json:"auto_reconnect"`
+	SyncMode      string `json:"sync_mode,omitempty"`
 }
 
 type mountSecret struct {
@@ -522,15 +524,15 @@ func (m *mountManager) connect(id string, manual bool) {
 		return
 	}
 
+	if config.Type == "google_drive" && googleDriveSyncMode(config) == "copy" {
+		m.syncRcloneRemoteToLocal(id, config)
+		return
+	}
 	if probe := probeRemote(config, secret, 12*time.Second); probe.Status != mountStatusConnected {
 		m.setProbeState(id, probe)
 		return
 	}
-	if config.Type == "google_drive" {
-		m.syncRcloneRemoteToLocal(id, config)
-		return
-	}
-	if config.Type == "smb" {
+	if config.Type == "smb" || config.Type == "google_drive" {
 		if err := ensureFuseDevice(); err != nil {
 			m.setFailedState(id, mountStatusError, err)
 			return
@@ -676,6 +678,9 @@ func (m *mountManager) reconcile() {
 		if state.Status == mountStatusAuthFailed || state.Status == mountStatusConnecting {
 			continue
 		}
+		if config.Type == "google_drive" && googleDriveSyncMode(config) == "copy" && state.Status == mountStatusSynced {
+			continue
+		}
 		if state.Status == mountStatusConnected {
 			if !m.isHealthy(id, config) {
 				m.setFailedState(id, mountStatusStale, errors.New("mount health check failed"))
@@ -801,6 +806,12 @@ func (m *mountManager) load() error {
 	}
 	for id, config := range m.configs {
 		state := m.states[id]
+		if config.Type == "google_drive" && googleDriveSyncMode(config) == "copy" {
+			config.Options.AutoConnect = false
+			config.Options.AutoReconnect = false
+			m.configs[id] = config
+			state.NextRetryAt = ""
+		}
 		if state.Status == mountStatusConnected || state.Status == mountStatusConnecting {
 			state.Status = mountStatusStale
 			state.LastError = "OpenCode Plus restarted before this mount was verified. It will reconnect if auto-reconnect is enabled."
@@ -884,7 +895,7 @@ func buildRcloneMountCommand(config mountConfig) (*exec.Cmd, func(), error) {
 	if remotePath != "" {
 		remote += strings.TrimPrefix(remotePath, "/")
 	}
-	args := []string{"mount", remote, config.MountPath, "--vfs-cache-mode", "writes", "--dir-cache-time", "1m", "--poll-interval", "1m", "--retries", "1", "--low-level-retries", "1"}
+	args := []string{"mount", remote, config.MountPath, "--vfs-cache-mode", "writes", "--cache-dir", rcloneCacheDir, "--dir-cache-time", "5m", "--poll-interval", "1m", "--retries", "1", "--low-level-retries", "1"}
 	if config.Options.ReadOnly {
 		args = append(args, "--read-only")
 	}
@@ -1005,6 +1016,14 @@ func probeRcloneRemote(ctx context.Context, config mountConfig, now string) moun
 		return mountRuntimeState{Status: status, LastError: redactError(errors.New(detail)), LastCheckedAt: now}
 	}
 	return mountRuntimeState{Status: mountStatusConnected, LastCheckedAt: now}
+}
+
+func googleDriveSyncMode(config mountConfig) string {
+	mode := strings.TrimSpace(config.Options.SyncMode)
+	if mode == "copy" || mode == "manual" || mode == "manual_sync" {
+		return "copy"
+	}
+	return "mount"
 }
 
 func googleDriveAccountHandler() http.HandlerFunc {
