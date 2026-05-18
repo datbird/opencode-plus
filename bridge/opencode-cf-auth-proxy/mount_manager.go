@@ -528,17 +528,28 @@ func (m *mountManager) connect(id string, manual bool) {
 		m.syncRcloneRemoteToLocal(id, config)
 		return
 	}
+	if config.Type == "google_drive" && googleDriveSyncMode(config) == "mount" {
+		if err := ensureFuseDevice(); err != nil {
+			m.setFailedState(id, mountStatusError, err)
+			return
+		}
+		m.startMountProcess(id, config, secret)
+		return
+	}
 	if probe := probeRemote(config, secret, 12*time.Second); probe.Status != mountStatusConnected {
 		m.setProbeState(id, probe)
 		return
 	}
-	if config.Type == "smb" || config.Type == "google_drive" {
+	if config.Type == "smb" {
 		if err := ensureFuseDevice(); err != nil {
 			m.setFailedState(id, mountStatusError, err)
 			return
 		}
 	}
+	m.startMountProcess(id, config, secret)
+}
 
+func (m *mountManager) startMountProcess(id string, config mountConfig, secret mountSecret) {
 	cmd, cleanup, err := buildMountCommand(config, secret)
 	if err != nil {
 		m.setFailedState(id, mountStatusError, err)
@@ -645,7 +656,27 @@ func (m *mountManager) test(id string) mountRuntimeState {
 	if !ok {
 		return mountRuntimeState{Status: mountStatusError, LastError: "mount_not_found"}
 	}
+	if config.Type == "google_drive" && googleDriveSyncMode(config) == "mount" {
+		return m.testGoogleDriveMount(config)
+	}
 	return probeRemote(config, secret, 12*time.Second)
+}
+
+func (m *mountManager) testGoogleDriveMount(config mountConfig) mountRuntimeState {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := exec.LookPath("rclone"); err != nil {
+		return mountRuntimeState{Status: mountStatusError, LastError: "rclone_not_installed", LastCheckedAt: now}
+	}
+	if rcloneRemoteName(config) == "" {
+		return mountRuntimeState{Status: mountStatusError, LastError: "rclone_remote_required", LastCheckedAt: now}
+	}
+	if err := ensureFuseDevice(); err != nil {
+		return mountRuntimeState{Status: mountStatusError, LastError: redactError(err), LastCheckedAt: now}
+	}
+	if isMountpoint(config.MountPath) {
+		return mountRuntimeState{Status: mountStatusConnected, LastCheckedAt: now}
+	}
+	return mountRuntimeState{Status: mountStatusDisconnected, LastError: "Live mount is configured and ready. Click Connect to start rclone mount without a separate Drive listing probe.", LastCheckedAt: now}
 }
 
 func (m *mountManager) loop() {
@@ -701,17 +732,33 @@ func (m *mountManager) reconcile() {
 func (m *mountManager) isHealthy(id string, config mountConfig) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
+	if config.Type == "google_drive" && googleDriveSyncMode(config) == "mount" {
+		return m.isMountpointHealthy(ctx, id, config)
+	}
 	cmd := exec.CommandContext(ctx, "bash", "-lc", "mountpoint -q \"$1\" && timeout 3s ls -A \"$1\" >/dev/null", "--", config.MountPath)
 	if err := cmd.Run(); err != nil {
 		return false
 	}
+	m.markHealthy(id)
+	return true
+}
+
+func (m *mountManager) isMountpointHealthy(ctx context.Context, id string, config mountConfig) bool {
+	cmd := exec.CommandContext(ctx, "mountpoint", "-q", config.MountPath)
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	m.markHealthy(id)
+	return true
+}
+
+func (m *mountManager) markHealthy(id string) {
 	m.mu.Lock()
 	state := m.states[id]
 	state.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	m.states[id] = state
 	_ = m.saveStateLocked()
 	m.mu.Unlock()
-	return true
 }
 
 func (m *mountManager) configAndSecret(id string) (mountConfig, mountSecret, bool) {
@@ -1087,6 +1134,12 @@ func ensureFuseDevice() error {
 	}
 	_ = os.Chmod("/dev/fuse", 0o666)
 	return nil
+}
+
+func isMountpoint(path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "mountpoint", "-q", path).Run() == nil
 }
 
 func listGoogleDriveRemotes() ([]string, error) {
