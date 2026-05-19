@@ -47,9 +47,7 @@
   const CONFIG_AREAS = [
     { id: "system", label: "OpenCode Plus Settings", description: "Gateway, statusline modules, vault encryption, and runtime preferences." },
     { id: "hidden", label: "OpenCode Hidden Settings", description: "Access persisted OpenCode settings that normally only live in config." },
-    { id: "soul", label: "Soul & Sync", description: "Database-backed Souls, synced skills, commands, tools, hooks, named spaces, and synced projects." },
-    { id: "storage-providers", label: "Storage Providers", description: "Connect reusable storage accounts and servers." },
-    { id: "workspace-links", label: "Workspace Links", description: "Map connected storage into the current workspace." },
+    { id: "soul", label: "Synchronization", description: "Set up synced projects, storage providers, and workspace folder mappings." },
   ];
 
   function readSettings() {
@@ -171,6 +169,113 @@
 
   function escapeHtml(value) {
     return String(value || "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
+  }
+
+  function maskSecretValue(value) {
+    return String(value || "").replace(/[^\n]/g, "•");
+  }
+
+  function secretFieldValue(field) {
+    return field?.dataset?.secretValue || "";
+  }
+
+  function rememberPlaceholder(field) {
+    if (!field || field.dataset.defaultPlaceholder !== undefined) return;
+    field.dataset.defaultPlaceholder = field.getAttribute("placeholder") || "";
+  }
+
+  function restorePlaceholder(field) {
+    if (!field) return;
+    rememberPlaceholder(field);
+    field.setAttribute("placeholder", field.dataset.defaultPlaceholder || "");
+  }
+
+  function showSavedSecretPlaceholder(field) {
+    if (!field) return;
+    rememberPlaceholder(field);
+    if (field.classList?.contains("ocp-drawer__masked-secret")) field.dataset.secretValue = "";
+    field.value = "";
+    field.setAttribute("placeholder", "•••••••• saved; leave blank to keep");
+    showSavedSecretIndicator(field);
+  }
+
+  function showSavedSecretIndicator(field) {
+    const label = field?.closest?.("label");
+    if (!label) return;
+    let indicator = label.querySelector(".ocp-drawer__saved-secret-indicator");
+    if (!indicator) {
+      indicator = document.createElement("small");
+      indicator.className = "ocp-drawer__saved-secret-indicator";
+      field.insertAdjacentElement("afterend", indicator);
+    }
+    indicator.textContent = "•••••••• saved; leave blank to keep";
+    indicator.hidden = false;
+    if (field.dataset.savedSecretListener !== "true") {
+      field.dataset.savedSecretListener = "true";
+      field.addEventListener("input", () => hideSavedSecretIndicator(field));
+    }
+  }
+
+  function hideSavedSecretIndicator(field) {
+    field?.closest?.("label")?.querySelector(".ocp-drawer__saved-secret-indicator")?.setAttribute("hidden", "");
+  }
+
+  function clearSecretField(field) {
+    if (!field) return;
+    field.dataset.secretValue = "";
+    field.value = "";
+    restorePlaceholder(field);
+    hideSavedSecretIndicator(field);
+  }
+
+  function setupMaskedSecretFields(container) {
+    container.querySelectorAll(".ocp-drawer__masked-secret").forEach((field) => {
+      rememberPlaceholder(field);
+      if (field.dataset.maskReady === "true") return;
+      field.dataset.maskReady = "true";
+      field.dataset.secretValue = "";
+      field.addEventListener("beforeinput", (event) => {
+        const current = field.dataset.secretValue || "";
+        const start = field.selectionStart ?? field.value.length;
+        const end = field.selectionEnd ?? start;
+        let next = current;
+        let cursor = start;
+        if (event.inputType === "insertText" || event.inputType === "insertCompositionText") {
+          next = current.slice(0, start) + (event.data || "") + current.slice(end);
+          cursor = start + (event.data || "").length;
+        } else if (event.inputType === "insertLineBreak" || event.inputType === "insertParagraph") {
+          next = current.slice(0, start) + "\n" + current.slice(end);
+          cursor = start + 1;
+        } else if (event.inputType === "deleteContentBackward") {
+          next = start === end ? current.slice(0, Math.max(0, start - 1)) + current.slice(end) : current.slice(0, start) + current.slice(end);
+          cursor = start === end ? Math.max(0, start - 1) : start;
+        } else if (event.inputType === "deleteContentForward") {
+          next = start === end ? current.slice(0, start) + current.slice(end + 1) : current.slice(0, start) + current.slice(end);
+          cursor = start;
+        } else {
+          return;
+        }
+        event.preventDefault();
+        field.dataset.secretValue = next;
+        field.value = maskSecretValue(next);
+        hideSavedSecretIndicator(field);
+        field.setSelectionRange(cursor, cursor);
+      });
+      field.addEventListener("paste", (event) => {
+        event.preventDefault();
+        const pasted = event.clipboardData?.getData("text") || "";
+        const current = field.dataset.secretValue || "";
+        const start = field.selectionStart ?? field.value.length;
+        const end = field.selectionEnd ?? start;
+        const next = current.slice(0, start) + pasted + current.slice(end);
+        field.dataset.secretValue = next;
+        field.value = maskSecretValue(next);
+        hideSavedSecretIndicator(field);
+        const cursor = start + pasted.length;
+        field.setSelectionRange(cursor, cursor);
+      });
+      field.addEventListener("drop", (event) => event.preventDefault());
+    });
   }
 
   function shorten(value, maxLength) {
@@ -437,8 +542,22 @@
   }
 
   async function fetchSoulStatus() {
-    const response = await fetch("/__opencode-plus/soul/status", { cache: "no-store" });
+    const query = new URLSearchParams({ local_path: currentOpenCodeDirectory() });
+    const response = await fetch(`/__opencode-plus/soul/status?${query}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function createSynchronizedProject(payload) {
+    const response = await fetch("/__opencode-plus/soul/project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
     return response.json();
   }
 
@@ -603,6 +722,12 @@
     return response.json();
   }
 
+  async function restartGateway() {
+    const response = await fetch("/__opencode-plus/gateway/restart", { method: "POST" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
   async function updateOpenCode() {
     const response = await fetch("/__opencode-plus/opencode/update", { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -646,8 +771,42 @@
     return response.json();
   }
 
+  async function updateStorageProvider(id, payload) {
+    const response = await fetch(`/__opencode-plus/storage-providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   async function deleteStorageProvider(id) {
     const response = await fetch(`/__opencode-plus/storage-providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function testStorageProvider(id) {
+    const response = await fetch(`/__opencode-plus/storage-providers/${encodeURIComponent(id)}/test`, { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function browseStorageProvider(id, path = "") {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    const query = params.toString();
+    const response = await fetch(`/__opencode-plus/storage-providers/${encodeURIComponent(id)}/browse${query ? `?${query}` : ""}`, { cache: "no-store" });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.detail || body.error || `HTTP ${response.status}`);
@@ -795,7 +954,7 @@
     return overlay;
   }
 
-  function showWorkspaceLinkOverlay(root, titleText, detailText) {
+  function showWorkspaceFolderMappingOverlay(root, titleText, detailText) {
     let overlay = root.querySelector(".ocp-drawer__link-action-overlay");
     if (!overlay) {
       overlay = document.createElement("div");
@@ -805,7 +964,7 @@
           <span class="ocp-drawer__restart-spinner" aria-hidden="true"></span>
           <strong class="ocp-drawer__link-action-title"></strong>
           <p class="ocp-drawer__restart-detail ocp-drawer__link-action-detail"></p>
-          <button type="button" class="ocp-drawer__button ocp-drawer__link-action-close" disabled>Close</button>
+          <button type="button" class="ocp-drawer__button ocp-drawer__link-action-close" disabled>OK</button>
         </div>
       `;
       root.append(overlay);
@@ -813,13 +972,15 @@
     }
     overlay.hidden = false;
     overlay.querySelector(".ocp-drawer__restart-spinner")?.removeAttribute("hidden");
-    overlay.querySelector(".ocp-drawer__link-action-close")?.setAttribute("disabled", "");
+    const close = overlay.querySelector(".ocp-drawer__link-action-close");
+    close?.setAttribute("disabled", "");
+    if (close) close.textContent = "OK";
     overlay.querySelector(".ocp-drawer__link-action-title").textContent = titleText;
     overlay.querySelector(".ocp-drawer__link-action-detail").textContent = detailText;
     return overlay;
   }
 
-  function finishWorkspaceLinkOverlay(overlay, titleText, detailText) {
+  function finishWorkspaceFolderMappingOverlay(overlay, titleText, detailText) {
     if (!overlay) return;
     overlay.querySelector(".ocp-drawer__restart-spinner")?.setAttribute("hidden", "");
     overlay.querySelector(".ocp-drawer__link-action-title").textContent = titleText;
@@ -983,6 +1144,7 @@
   }
 
   async function setupCredentialControls(container) {
+    setupMaskedSecretFields(container);
     const keyStatus = container.querySelector(".ocp-drawer__secrets-key-status");
     const generateButton = container.querySelector(".ocp-drawer__secrets-generate");
     const openRouterInput = container.querySelector(".ocp-drawer__openrouter-key");
@@ -1072,7 +1234,7 @@
     });
 
     geminiButton?.addEventListener("click", async () => {
-      const value = geminiInput.value.trim();
+      const value = secretFieldValue(geminiInput).trim();
       if (!value) {
         geminiInput.focus();
         return;
@@ -1080,7 +1242,7 @@
       geminiButton.disabled = true;
       try {
         await saveGeminiCredentials(value);
-        geminiInput.value = "";
+        clearSecretField(geminiInput);
         await refreshStatus();
       } catch (error) {
         container.querySelector(".ocp-drawer__provider-status[data-provider='gemini']").textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1200,6 +1362,10 @@
     const moduleList = container.querySelector(".ocp-drawer__system-module-list");
     const nativeCollapsed = container.querySelector(".ocp-drawer__plus-native-collapsed");
     const drawerOpen = container.querySelector(".ocp-drawer__plus-drawer-open");
+    const instanceInput = container.querySelector(".ocp-drawer__plus-instance-name");
+    const instanceSave = container.querySelector(".ocp-drawer__plus-instance-save");
+    const gatewayRestart = container.querySelector(".ocp-drawer__plus-gateway-restart");
+    const instanceDetail = container.querySelector(".ocp-drawer__plus-instance-detail");
 
     async function refreshStatus() {
       try {
@@ -1249,6 +1415,53 @@
     drawerOpen?.addEventListener("change", () => {
       setOpen(root, settings, drawerOpen.checked);
     });
+
+    try {
+      const response = await fetchPlusConfig();
+      const instanceName = response?.config?.instance_name || "";
+      if (instanceInput) instanceInput.value = instanceName;
+      if (instanceDetail) {
+        instanceDetail.textContent = instanceName
+          ? `Current configured instance name: ${instanceName}. Restart OpenCode Plus after saving changes so synchronization uses it as the stable instance ID and name.`
+          : "Set this once to give synchronization a stable instance ID/name. If blank, OpenCode Plus falls back to the Docker hostname.";
+      }
+    } catch (error) {
+      if (instanceDetail) instanceDetail.textContent = `Instance name unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    instanceSave?.addEventListener("click", async () => {
+      const name = (instanceInput?.value || "").trim();
+      if (!name) {
+        if (instanceDetail) instanceDetail.textContent = "Enter an instance name first.";
+        return;
+      }
+      instanceSave.disabled = true;
+      if (instanceDetail) instanceDetail.textContent = "Saving instance name...";
+      try {
+        const response = await updatePlusConfig({ instance_name: name });
+        const savedName = response?.config?.instance_name || name;
+        if (instanceInput) instanceInput.value = savedName;
+        if (instanceDetail) instanceDetail.textContent = `Saved ${savedName}. Restart OpenCode Plus to apply it to synchronization identity.`;
+      } catch (error) {
+        if (instanceDetail) instanceDetail.textContent = `Instance name save failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        instanceSave.disabled = false;
+      }
+    });
+
+    gatewayRestart?.addEventListener("click", async () => {
+      const confirmed = window.confirm("Restart the OpenCode Plus gateway now? The drawer may disconnect briefly while the new instance identity loads.");
+      if (!confirmed) return;
+      gatewayRestart.disabled = true;
+      if (instanceDetail) instanceDetail.textContent = "Restarting OpenCode Plus gateway... Refresh this page in a few seconds.";
+      try {
+        await restartGateway();
+      } catch (error) {
+        if (instanceDetail) instanceDetail.textContent = `OpenCode Plus restart failed: ${error instanceof Error ? error.message : String(error)}`;
+        gatewayRestart.disabled = false;
+      }
+    });
+
     setupGatewayControls(container);
     await refreshStatus();
   }
@@ -1341,6 +1554,15 @@
       </div>
       <div class="ocp-drawer__system-section">
         <h4>OpenCode Plus UI</h4>
+        <label>
+          <span>Instance name</span>
+          <input class="ocp-drawer__field ocp-drawer__plus-instance-name" type="text" placeholder="e.g. opencode2" autocomplete="off">
+        </label>
+        <p class="ocp-drawer__field-detail ocp-drawer__plus-instance-detail">Checking instance name...</p>
+        <div class="ocp-drawer__button-row">
+          <button type="button" class="ocp-drawer__button ocp-drawer__plus-instance-save">Save Instance Name</button>
+          <button type="button" class="ocp-drawer__button ocp-drawer__plus-gateway-restart">Restart OpenCode Plus</button>
+        </div>
         <label class="ocp-drawer__hidden-toggle">
           <input class="ocp-drawer__plus-native-collapsed" type="checkbox" ${readSettings().nativeControlsCollapsed ? "checked" : ""}>
           <span>
@@ -1387,39 +1609,83 @@
 
   function soulSyncMarkup() {
     return `
-      <p class="ocp-drawer__modal-intro">OpenCode Plus Soul Sync will use PocketBase as the source of truth and render normal OpenCode files like <code>AGENTS.md</code>, skills, commands, tools, and plugins.</p>
-      <div class="ocp-drawer__system-section">
-        <h4>Database</h4>
-        <p class="ocp-drawer__field-detail ocp-drawer__soul-db-status">Checking PocketBase...</p>
-        <p class="ocp-drawer__field-detail ocp-drawer__soul-schema-status">Checking schema...</p>
+      <div class="ocp-drawer__modal-intro ocp-drawer__sync-summary">
+        <strong>Synchronization is optional and modular.</strong>
+        <span>Use it to make this workspace portable across OpenCode instances: register the project, share sync metadata through PocketBase, connect storage accounts, and map remote folders into the local workspace.</span>
+        <span>You do not need every piece to get value. You can set up only a synced project, only a storage provider, only a workspace folder mapping, or the full flow.</span>
+        <span>Full setup requires a reachable PocketBase database, ready sync tables, a stable instance name, at least one synced project, and any storage provider/folder mappings you want to use.</span>
+      </div>
+      <div class="ocp-drawer__system-section ocp-drawer__sync-actions">
+        <h4>Setup Checklist</h4>
+        <div class="ocp-drawer__sync-checklist">
+          <div class="ocp-drawer__sync-check" data-sync-check="database"><span><strong>Database connected</strong><small>Checking...</small></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Database Settings</button></div>
+          <div class="ocp-drawer__sync-check" data-sync-check="schema"><span><strong>Sync tables ready</strong><small>Checking...</small></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Database Settings</button></div>
+          <div class="ocp-drawer__sync-check" data-sync-check="space"><span><strong>Project space ready</strong><small>Will be created automatically if missing.</small></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Set Up Synced Project</button></div>
+          <div class="ocp-drawer__sync-check" data-sync-check="project"><span><strong>This workspace registered</strong><small>Click setup to create or update it.</small></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Set Up Synced Project</button></div>
+          <div class="ocp-drawer__sync-check" data-sync-check="provider"><span><strong>Storage provider connected</strong><small>Add Google Drive, SSH/SFTP, or SMB if needed.</small></span><button type="button" class="ocp-drawer__button" data-sync-section="storage-providers">Set Up Storage Providers</button></div>
+          <div class="ocp-drawer__sync-check" data-sync-check="mapping"><span><strong>Workspace folder mapped</strong><small>Map provider folders into this workspace if needed.</small></span><button type="button" class="ocp-drawer__button" data-sync-section="workspace-folders">Map Workspace Folders</button></div>
+        </div>
+        <div class="ocp-drawer__button-row"><button type="button" class="ocp-drawer__button" data-sync-action="refresh">Refresh synchronization status</button></div>
+        <p class="ocp-drawer__field-detail ocp-drawer__sync-action-detail">Ready to check this workspace.</p>
       </div>
       <div class="ocp-drawer__system-section">
-        <h4>Deployment</h4>
+        <h4>Sync Infrastructure</h4>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-db-status">Checking PocketBase...</p>
+        <p class="ocp-drawer__field-detail ocp-drawer__soul-schema-status">Checking schema...</p>
         <p class="ocp-drawer__field-detail ocp-drawer__soul-deployment-status">Checking deployment identity...</p>
         <div class="ocp-drawer__instance-list">Loading known instances...</div>
       </div>
       <div class="ocp-drawer__system-section">
-        <h4>What Sync Means Today</h4>
-        <div class="ocp-drawer__sync-scope-list">
-          <div><strong>Shared via PocketBase:</strong> deployment heartbeat, schema readiness, metadata records.</div>
-          <div><strong>Local to this instance:</strong> OpenCode memory files, rendered files, secrets, browser state.</div>
-          <div><strong>Not active yet:</strong> automatic file rendering for <code>AGENTS.md</code>, skills, commands, tools, plugins, or projects.</div>
-        </div>
-      </div>
-      <div class="ocp-drawer__system-section">
-        <h4>Synced Features</h4>
-        <div class="ocp-drawer__soul-feature-list">
-          <p class="ocp-drawer__field-detail">Loading feature readiness...</p>
-        </div>
-      </div>
-      <div class="ocp-drawer__system-section">
-        <h4>Synced Projects</h4>
-        <p class="ocp-drawer__field-detail ocp-drawer__soul-project-gate">Checking requirements...</p>
+        <h4>Database Settings</h4>
+        <label class="ocp-drawer__hidden-toggle">
+          <input class="ocp-drawer__sync-db-enabled" type="checkbox">
+          <span>
+            <strong>Enable synchronization database</strong>
+            <small>Use PocketBase for project registration, named spaces, souls, and shared assets.</small>
+          </span>
+        </label>
+        <label>
+          <span>PocketBase URL</span>
+          <input class="ocp-drawer__field ocp-drawer__sync-db-url" type="url" placeholder="http://pocketbase:8080" autocomplete="off">
+        </label>
         <div class="ocp-drawer__button-row">
-          <button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project" disabled title="Requires PocketBase connection and at least one named space.">Create Synced Project</button>
+          <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-save">Save Database Settings</button>
+          <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-restart">Restart OpenCode Plus</button>
         </div>
+        <p class="ocp-drawer__field-detail ocp-drawer__sync-db-detail">Checking database settings...</p>
+      </div>
+      <div class="ocp-drawer__system-section ocp-drawer__sync-storage-providers" data-sync-panel="storage-providers">
+        <h4>Storage Providers</h4>
+        ${mountManagerMarkup("providers")}
+      </div>
+      <div class="ocp-drawer__system-section ocp-drawer__sync-workspace-folders" data-sync-panel="workspace-folders">
+        <h4>Workspace Folder Mapping</h4>
+        ${mountManagerMarkup("links")}
       </div>
     `;
+  }
+
+  function synchronizationFeatureLabel(key) {
+    const labels = {
+      souls: "Souls",
+      skills: "Skills",
+      commands: "Commands",
+      tools: "Tools",
+      plugins_hooks: "Plugins and hooks",
+      named_spaces: "Named spaces",
+      synced_projects: "Project synchronization",
+    };
+    return labels[key] || key.replace(/_/g, " ");
+  }
+
+  function setSyncCheck(container, key, complete, detail) {
+    const row = container.querySelector(`.ocp-drawer__sync-check[data-sync-check='${key}']`);
+    if (!row) return;
+    row.classList.toggle("ocp-drawer__sync-check--done", Boolean(complete));
+    row.classList.toggle("ocp-drawer__sync-check--pending", !complete);
+    row.setAttribute("aria-label", `${row.querySelector("strong")?.textContent || key}: ${complete ? "complete" : "needs setup"}`);
+    const small = row.querySelector("small");
+    if (small) small.textContent = detail;
   }
 
   function renderSoulStatus(container, status) {
@@ -1432,11 +1698,26 @@
     const featureList = container.querySelector(".ocp-drawer__soul-feature-list");
     const projectGate = container.querySelector(".ocp-drawer__soul-project-gate");
     const createProject = container.querySelector(".ocp-drawer__soul-create-project");
+    const dbEnabled = container.querySelector(".ocp-drawer__sync-db-enabled");
+    const dbURL = container.querySelector(".ocp-drawer__sync-db-url");
+    const dbDetail = container.querySelector(".ocp-drawer__sync-db-detail");
+
+    setSyncCheck(container, "database", Boolean(status?.enabled && db.connected), db.connected ? "PocketBase is reachable." : "PocketBase is not reachable yet.");
+    setSyncCheck(container, "schema", Boolean(status?.schema_ready), status?.schema_ready ? "Required sync tables exist." : "Sync tables are not initialized yet.");
+    setSyncCheck(container, "space", Boolean(status?.named_space_count), status?.named_space_count ? `${status.named_space_count} project space${status.named_space_count === 1 ? "" : "s"} ready.` : "No project space yet. Setup will create one.");
+    setSyncCheck(container, "project", Boolean(status?.project_registered), status?.project_registered ? `Registered ${currentOpenCodeDirectory()}.` : `Current workspace: ${currentOpenCodeDirectory()}`);
 
     if (dbStatus) {
       dbStatus.textContent = status?.enabled
-        ? `PocketBase ${db.connected ? "connected" : "unavailable"}: ${db.url || "not configured"}. ${db.connected ? "Sync prerequisites can be checked." : "Sync features remain disabled until the database is reachable."}`
-        : "Soul Sync database features are disabled; OpenCode continues normally.";
+        ? `PocketBase ${db.connected ? "connected" : "unavailable"}: ${db.url || "not configured"}. ${db.connected ? "Synchronization prerequisites can be checked." : "Synchronization features remain disabled until the database is reachable."}`
+        : "Synchronization database features are disabled; OpenCode continues normally.";
+    }
+    if (dbEnabled) dbEnabled.checked = Boolean(status?.enabled);
+    if (dbURL) dbURL.value = db.url || "";
+    if (dbDetail) {
+      dbDetail.textContent = status?.enabled
+        ? `Using ${db.url || "no PocketBase URL configured"}. Save changes, then restart OpenCode Plus to apply them.`
+        : "Database synchronization is disabled. Save changes, then restart OpenCode Plus to apply them.";
     }
     if (deploymentStatus) {
       const stableText = deployment.stable_identity === false ? "unstable Docker hostname fallback" : "stable identity";
@@ -1470,13 +1751,13 @@
     }
     if (schemaStatus) {
       if (!status?.enabled) {
-        schemaStatus.textContent = "Schema checks skipped because database sync is disabled.";
+        schemaStatus.textContent = "Schema checks skipped because database synchronization is disabled.";
       } else if (!db.connected) {
         schemaStatus.textContent = "Schema checks skipped until PocketBase is reachable.";
       } else if (status.schema_ready) {
         schemaStatus.textContent = `Schema initialized. Named spaces configured: ${status.named_space_count || 0}.`;
       } else {
-        schemaStatus.textContent = "Schema not initialized. Sync modules remain safely disabled.";
+        schemaStatus.textContent = "Schema not initialized. Synchronization modules remain safely disabled.";
       }
     }
     if (featureList) {
@@ -1484,41 +1765,136 @@
       featureList.innerHTML = Object.entries(features).map(([key, value]) => `
         <div class="ocp-drawer__config-row">
           <span class="ocp-drawer__config-copy">
-            <strong>${escapeHtml(key.replace(/_/g, " "))}</strong>
+            <strong>${escapeHtml(synchronizationFeatureLabel(key))}</strong>
             <small>${escapeHtml(value)}</small>
           </span>
         </div>
-      `).join("") || `<p class="ocp-drawer__field-detail">No synced features reported yet.</p>`;
+      `).join("") || `<p class="ocp-drawer__field-detail">No synchronization features reported yet.</p>`;
     }
     if (projectGate) {
       if (!db.connected) {
-        projectGate.textContent = "Create Synced Project is safely disabled because it requires PocketBase connection and at least one named space.";
+        projectGate.textContent = "Create Synchronized Project is safely disabled because it requires PocketBase connection and at least one named space.";
       } else if (!status.schema_ready) {
-        projectGate.textContent = "Create Synced Project is safely disabled until the Soul Sync schema is initialized.";
+        projectGate.textContent = "Create Synchronized Project is safely disabled until the synchronization schema is initialized.";
       } else if (!status.named_space_count) {
-        projectGate.textContent = "Create Synced Project is safely disabled until at least one Named Space exists.";
+        projectGate.textContent = "Create Synchronized Project is safely disabled until at least one named space exists.";
       } else {
-        projectGate.textContent = "Synced Project prerequisites are ready. Creation UI is coming next.";
+        projectGate.textContent = "Synchronized project prerequisites are ready. Creation UI is coming next.";
       }
     }
     if (createProject) {
-      createProject.disabled = true;
-      createProject.title = db.connected
-        ? "Next step: initialize Soul Sync schema and create a named space."
-        : "Requires PocketBase connection and at least one named space.";
+      createProject.disabled = !(db.connected && status?.schema_ready);
+      createProject.title = createProject.disabled
+        ? "Requires PocketBase connection and initialized synchronization schema."
+        : "Create or update the synced project record for this workspace.";
     }
   }
 
-  async function setupSoulSyncControls(container) {
-    try {
-      const status = await fetchSoulStatus();
-      renderSoulStatus(container, status);
-      const root = document.getElementById("opencode-plus-drawer");
-      if (root) updateInstanceBadge(root, status);
-    } catch (error) {
-      const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
-      if (dbStatus) dbStatus.textContent = `Soul Sync status unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  async function setupSoulSyncControls(container, root, settings) {
+    async function refreshStatus() {
+      const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
+      if (actionDetail) actionDetail.textContent = "Refreshing synchronization status...";
+      try {
+        const status = await fetchSoulStatus();
+        renderSoulStatus(container, status);
+        try {
+          const [providersResponse, mountsResponse] = await Promise.all([fetchStorageProviders(), fetchMounts()]);
+          const providers = Array.isArray(providersResponse?.providers) ? providersResponse.providers : [];
+          const mounts = Array.isArray(mountsResponse?.mounts) ? mountsResponse.mounts : [];
+          setSyncCheck(container, "provider", providers.length > 0, providers.length ? `${providers.length} storage provider${providers.length === 1 ? "" : "s"} connected.` : "Click to connect Google Drive, SSH/SFTP, or SMB.");
+          setSyncCheck(container, "mapping", mounts.length > 0, mounts.length ? `${mounts.length} workspace folder mapping${mounts.length === 1 ? "" : "s"} configured.` : "Click to map a provider folder into this workspace.");
+        } catch (error) {
+          setSyncCheck(container, "provider", false, "Storage provider status unavailable.");
+          setSyncCheck(container, "mapping", false, "Workspace folder mapping status unavailable.");
+        }
+        if (root) updateInstanceBadge(root, status);
+        if (actionDetail) actionDetail.textContent = "Synchronization status refreshed.";
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const dbStatus = container.querySelector(".ocp-drawer__soul-db-status");
+        if (dbStatus) dbStatus.textContent = `Synchronization status unavailable: ${message}`;
+        if (actionDetail) actionDetail.textContent = `Refresh failed: ${message}`;
+      }
     }
+
+    container.querySelectorAll("[data-sync-open]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const area = CONFIG_AREAS.find((item) => item.id === button.dataset.syncOpen);
+        if (root && area) openConfigArea(root, area, settings);
+      });
+    });
+    container.querySelectorAll("[data-sync-section]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const panel = container.querySelector(`[data-sync-panel='${button.dataset.syncSection}']`);
+        if (panel instanceof HTMLDetailsElement) panel.open = true;
+        panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+    container.querySelector("[data-sync-action='refresh']")?.addEventListener("click", refreshStatus);
+    container.querySelector("[data-sync-action='identity-help']")?.addEventListener("click", () => {
+      const area = CONFIG_AREAS.find((item) => item.id === "system");
+      if (root && area) openConfigArea(root, area, settings);
+    });
+    container.querySelectorAll(".ocp-drawer__soul-create-project").forEach((setupButton) => setupButton.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const buttons = Array.from(container.querySelectorAll(".ocp-drawer__soul-create-project"));
+      const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
+      const workspace = currentOpenCodeDirectory();
+      const projectName = workspace.split("/").filter(Boolean).pop() || "OpenCode Project";
+      buttons.forEach((item) => { item.disabled = true; });
+      if (actionDetail) actionDetail.textContent = "Creating or updating synced project records...";
+      try {
+        const result = await createSynchronizedProject({ name: projectName, local_path: workspace });
+        setSyncCheck(container, "space", true, result.created_space ? "Created default project space." : "Project space already existed.");
+        setSyncCheck(container, "project", true, result.created_project ? "Created synced project for this workspace." : "Updated existing synced project mapping.");
+        if (actionDetail) actionDetail.textContent = "Synced project is set up for this workspace.";
+        await refreshStatus();
+        setSyncCheck(container, "project", true, `Registered ${workspace}.`);
+      } catch (error) {
+        if (actionDetail) actionDetail.textContent = `Setup failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        buttons.forEach((item) => { item.disabled = false; });
+      }
+    }));
+    container.querySelector(".ocp-drawer__sync-db-save")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const enabled = Boolean(container.querySelector(".ocp-drawer__sync-db-enabled")?.checked);
+      const pbURL = (container.querySelector(".ocp-drawer__sync-db-url")?.value || "").trim();
+      const detail = container.querySelector(".ocp-drawer__sync-db-detail");
+      if (!pbURL) {
+        if (detail) detail.textContent = "Enter a PocketBase URL first.";
+        return;
+      }
+      button.disabled = true;
+      if (detail) detail.textContent = "Saving database settings...";
+      try {
+        const response = await updatePlusConfig({ soul_db_enabled: enabled, soul_pb_url: pbURL });
+        const saved = response?.config || {};
+        const urlInput = container.querySelector(".ocp-drawer__sync-db-url");
+        if (urlInput) urlInput.value = saved.soul_pb_url || pbURL;
+        if (detail) detail.textContent = "Saved. Restart OpenCode Plus to apply the database settings.";
+      } catch (error) {
+        if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    container.querySelector(".ocp-drawer__sync-db-restart")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const detail = container.querySelector(".ocp-drawer__sync-db-detail");
+      const confirmed = window.confirm("Restart the OpenCode Plus gateway now? The drawer may disconnect briefly while database settings reload.");
+      if (!confirmed) return;
+      button.disabled = true;
+      if (detail) detail.textContent = "Restarting OpenCode Plus gateway... Refresh this page in a few seconds.";
+      try {
+        await restartGateway();
+      } catch (error) {
+        if (detail) detail.textContent = `OpenCode Plus restart failed: ${error instanceof Error ? error.message : String(error)}`;
+        button.disabled = false;
+      }
+    });
+
+    await refreshStatus();
   }
 
   async function setupHiddenSettingsControls(container) {
@@ -1561,14 +1937,25 @@
     const showProviders = mode === "all" || mode === "providers";
     const showLinks = mode === "all" || mode === "links";
     return `
-      <p class="ocp-drawer__modal-intro">${showProviders && !showLinks ? "Connect reusable storage accounts and servers." : "Map connected storage into this workspace."}</p>
+      <p class="ocp-drawer__modal-intro">${showProviders && !showLinks ? "Create reusable storage provider profiles, then edit them whenever credentials or host details change." : "Create workspace storage profiles that map one saved provider into this workspace."}</p>
       ${showProviders ? `
-      <div class="ocp-drawer__system-section">
-        <h4>Storage Providers</h4>
-        <div class="ocp-drawer__credential-form ocp-drawer__provider-form">
-          <label title="A friendly name for this reusable account or server. This name appears in Workspace Links.">
+      <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--providers ocp-drawer__profile-shell--list-only">
+        <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--providers">
+          <div class="ocp-drawer__profile-panel-header">
+            <span><strong>Provider profiles</strong><small>Accounts and servers you can reuse.</small></span>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-new" aria-label="Add storage provider" title="Add storage provider">+</button>
+          </div>
+          <div class="ocp-drawer__provider-list ocp-drawer__profile-list">Loading providers...</div>
+        </div>
+        <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--providers" hidden>
+          <div class="ocp-drawer__profile-editor-heading">
+            <span><strong class="ocp-drawer__provider-editor-title">New Storage Provider</strong><small>Save credentials once, link folders separately.</small></span>
+          </div>
+          <div class="ocp-drawer__credential-form ocp-drawer__provider-form">
+          <input class="ocp-drawer__provider-edit-id" type="hidden">
+          <label title="A friendly name for this reusable account or server. This name appears in Workspace Folder Mapping.">
             <span>Provider name</span>
-            <input class="ocp-drawer__field ocp-drawer__provider-name" type="text" placeholder="e.g. 'gdrive' or 'production-server'" title="A friendly name for this reusable account or server. This name appears in Workspace Links.">
+            <input class="ocp-drawer__field ocp-drawer__provider-name" type="text" placeholder="e.g. 'gdrive' or 'production-server'" title="A friendly name for this reusable account or server. This name appears in Workspace Folder Mapping.">
           </label>
           <label title="The kind of storage connection to save. Provider-specific fields appear below.">
             <span>Type</span>
@@ -1585,25 +1972,39 @@
           <p class="ocp-drawer__field-detail ocp-drawer__provider-detail"></p>
           <div class="ocp-drawer__credential-form ocp-drawer__provider-google-connect">
             <div class="ocp-drawer__field-detail ocp-drawer__mount-google-steps">
-              <strong>Connect steps</strong>
-              <span>1. On your Device, install rclone if needed: <a href="https://rclone.org/downloads/" target="_blank" rel="noopener noreferrer">rclone downloads</a>.</span>
-              <span>2. Run this in Terminal or PowerShell: <code>rclone authorize "drive"</code></span>
-              <span>3. A Google login page opens. Sign in and allow access.</span>
-              <span>4. Copy the JSON block rclone prints, then paste it below.</span>
-              <span>Token-based Google Drive providers are manual-only: Workspace Links copy files locally only when you click <strong>Sync</strong>. They do not live-mount or auto-sync in the background.</span>
-              <span>If you see Google API quota errors, create your own Google OAuth Client ID/Secret and authorize with <code>rclone authorize "drive" CLIENT_ID CLIENT_SECRET</code>.</span>
+              <strong>Google Drive connection setup</strong>
+              <details class="ocp-drawer__setup-step" open>
+                <summary>1. Create a Google OAuth app</summary>
+                <span>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Credentials</a>, choose or create a project, then select <strong>Create Credentials</strong> → <strong>OAuth client ID</strong>.</span>
+                <span>If Google asks for an OAuth consent screen first, use <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noopener noreferrer">OAuth consent screen</a>, choose <strong>External</strong> for personal Google accounts, add your email as a test user, and save.</span>
+              </details>
+              <details class="ocp-drawer__setup-step">
+                <summary>2. Choose Desktop app</summary>
+                <span>For Application type, choose <strong>Desktop app</strong>. Name it something like <strong>OpenCode Plus rclone</strong>, then create it.</span>
+                <span>Copy the generated Client ID and Client Secret into the required fields below.</span>
+              </details>
+              <details class="ocp-drawer__setup-step">
+                <summary>3. Authorize rclone with that app</summary>
+                <span>Install rclone if needed: <a href="https://rclone.org/downloads/" target="_blank" rel="noopener noreferrer">rclone downloads</a>.</span>
+                <span>Run <code>rclone authorize "drive" CLIENT_ID CLIENT_SECRET</code> using the exact Client ID and Client Secret from Google Cloud.</span>
+              </details>
+              <details class="ocp-drawer__setup-step">
+                <summary>4. Paste the token JSON</summary>
+                <span>A Google login page opens. Sign in, allow access, then copy the full JSON block rclone prints.</span>
+                <span>Paste that JSON below. When editing an existing provider, leave token and secret blank to keep the saved Google account.</span>
+              </details>
             </div>
-            <label title="Optional Google OAuth client ID. Only needed if the shared rclone Google app hits quota limits.">
-              <span>Google OAuth Client ID (optional)</span>
-              <input class="ocp-drawer__field ocp-drawer__provider-google-client-id" type="text" autocomplete="off" placeholder="Only needed if rclone default quota is exceeded" title="Optional Google OAuth client ID. Only needed if the shared rclone Google app hits quota limits.">
+            <label title="Required Google OAuth desktop app client ID from Google Cloud Credentials.">
+              <span>Google OAuth Client ID</span>
+              <input class="ocp-drawer__field ocp-drawer__provider-google-client-id" type="text" autocomplete="off" placeholder="Required Google OAuth desktop client ID" title="Required Google OAuth desktop app client ID from Google Cloud Credentials.">
             </label>
-            <label title="Optional Google OAuth client secret matching the client ID used to generate the token.">
-              <span>Google OAuth Client Secret (optional)</span>
-              <input class="ocp-drawer__field ocp-drawer__provider-google-client-secret" type="password" autocomplete="off" title="Optional Google OAuth client secret matching the client ID used to generate the token.">
+            <label title="Required Google OAuth desktop app client secret matching the client ID used to generate the token.">
+              <span>Google OAuth Client Secret</span>
+              <input class="ocp-drawer__field ocp-drawer__provider-google-client-secret" type="password" autocomplete="off" placeholder="Required for new Google Drive providers" title="Required Google OAuth desktop app client secret matching the client ID used to generate the token.">
             </label>
-            <label title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider. Token-based Google Drive links are manual Sync only.">
+            <label title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider.">
               <span>Authorization token JSON</span>
-              <textarea class="ocp-drawer__field ocp-drawer__provider-google-token" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"..."}' title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider. Token-based Google Drive links are manual Sync only."></textarea>
+              <textarea class="ocp-drawer__field ocp-drawer__provider-google-token ocp-drawer__masked-secret" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"..."}' title="Paste the full JSON token printed by rclone authorize. This connects the Google Drive account to this provider."></textarea>
             </label>
           </div>
           <label data-provider-field="port" title="Network port for SSH/SFTP. Leave blank to use the default port 22.">
@@ -1620,56 +2021,72 @@
           </label>
           <label data-provider-field="private_key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password.">
             <span>Private key</span>
-            <textarea class="ocp-drawer__field ocp-drawer__provider-private-key" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password."></textarea>
+            <textarea class="ocp-drawer__field ocp-drawer__provider-private-key ocp-drawer__masked-secret" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password."></textarea>
           </label>
           <div class="ocp-drawer__button-row">
-            <button type="button" class="ocp-drawer__button ocp-drawer__provider-save">Save Storage Provider</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__provider-save">Save Provider</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__provider-cancel-edit ocp-drawer__mount-field--hidden">Cancel Edit</button>
           </div>
           <p class="ocp-drawer__field-detail ocp-drawer__provider-save-detail">Storage providers save reusable account/server details only.</p>
         </div>
-        <div class="ocp-drawer__provider-list">Loading providers...</div>
+        </div>
       </div>
       ` : ""}
       ${showLinks ? `
-      <div class="ocp-drawer__system-section">
-        <h4>Workspace Links</h4>
-        <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
+      <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--links ocp-drawer__profile-shell--list-only">
+        <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--links">
+          <div class="ocp-drawer__profile-panel-header">
+            <span><strong>Workspace storage profiles</strong><small>Local folders mapped into this workspace.</small></span>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-new" aria-label="Add workspace folder mapping" title="Add workspace folder mapping">+</button>
+          </div>
+          <div class="ocp-drawer__mount-list ocp-drawer__profile-list">Loading mounts...</div>
+        </div>
+        <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--links" hidden>
+          <div class="ocp-drawer__profile-editor-heading">
+            <span><strong class="ocp-drawer__mount-editor-title">New Workspace Folder Mapping</strong><small>Pick a provider, then choose the remote and local folders.</small></span>
+          </div>
+          <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
           <input class="ocp-drawer__mount-edit-id" type="hidden">
-          <label title="Choose one saved Storage Provider. The link will use that provider's saved account/server details.">
+          <label title="Choose one saved Storage Provider. The mapping will use that provider's saved account/server details.">
             <span>Storage provider</span>
-            <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved Storage Provider. The link will use that provider's saved account/server details."></select>
+            <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved Storage Provider. The mapping will use that provider's saved account/server details."></select>
           </label>
           <label title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
             <span>Remote folder/path</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="opencode-plus or /home/robert/project" title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
+            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="e.g. opencode-plus or /home/robert/project" title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
           </label>
+          <details class="ocp-drawer__browse-panel ocp-drawer__mount-field--hidden" data-mount-field="browse">
+            <summary>Browse remote folders</summary>
+            <div class="ocp-drawer__browse-header">
+              <span><strong>Google Drive folders</strong><small>Select a Drive folder for this workspace folder mapping.</small></span>
+              <button type="button" class="ocp-drawer__button ocp-drawer__browse-load">Load folders</button>
+            </div>
+            <div class="ocp-drawer__browse-path" hidden></div>
+            <div class="ocp-drawer__browse-list" hidden></div>
+          </details>
           <label title="Local folder name created under this workspace's mounts folder. Use a simple folder name, not a full path.">
             <span>Local workspace folder</span>
             <input class="ocp-drawer__field ocp-drawer__mount-name" type="text" placeholder="work-files" title="Local folder name created under this workspace's mounts folder. Use a simple folder name, not a full path.">
           </label>
-          <label data-mount-field="sync_mode" class="ocp-drawer__mount-field--hidden" title="Google Drive can be mounted live when the container has FUSE permissions, or copied manually as a fallback.">
-            <span>Google Drive mode</span>
-            <select class="ocp-drawer__field ocp-drawer__mount-sync-mode" title="Google Drive can be mounted live when the container has FUSE permissions, or copied manually as a fallback.">
-              <option value="mount">Live mount</option>
-              <option value="copy">Manual copy only</option>
-            </select>
-          </label>
-          <p class="ocp-drawer__field-detail">Created under <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>.</p>
-          <label class="ocp-drawer__hidden-toggle" title="When enabled, agents should treat this linked storage as read-only where supported.">
-            <input class="ocp-drawer__mount-read-only" type="checkbox" checked title="When enabled, agents should treat this linked storage as read-only where supported.">
+          <details class="ocp-drawer__local-panel">
+            <summary>Local workspace folder details</summary>
+            <p class="ocp-drawer__field-detail">Created under <code>${escapeHtml(currentOpenCodeDirectory())}/mounts</code>. Use a short folder name such as <code>client-files</code>; do not enter a full path.</p>
+          </details>
+          <label class="ocp-drawer__hidden-toggle" title="When enabled, agents should treat this mapped storage as read-only where supported.">
+            <input class="ocp-drawer__mount-read-only" type="checkbox" checked title="When enabled, agents should treat this mapped storage as read-only where supported.">
             <span><strong>Read-only</strong><small>Recommended until you are ready for agents to write to this remote.</small></span>
           </label>
-          <label class="ocp-drawer__hidden-toggle" title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
-            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this Workspace Link later if the provider or network is temporarily unavailable.">
-            <span><strong>Auto-reconnect</strong><small>Retry unreachable SSH/SMB links later. Disabled for token-based Google Drive manual Sync.</small></span>
+          <label class="ocp-drawer__hidden-toggle" title="Automatically retry this workspace folder mapping later if the provider or network is temporarily unavailable.">
+            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this workspace folder mapping later if the provider or network is temporarily unavailable.">
+            <span><strong>Auto-reconnect</strong><small>Retry unreachable SSH/SMB mappings later.</small></span>
           </label>
           <div class="ocp-drawer__button-row">
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Workspace Link</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Mapping</button>
             <button type="button" class="ocp-drawer__button ocp-drawer__mount-cancel-edit ocp-drawer__mount-field--hidden">Cancel Edit</button>
           </div>
           <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">Choose a storage provider first.</p>
         </div>
-        <div class="ocp-drawer__mount-list">Loading mounts...</div>
+        </div>
       </div>
       ` : ""}
     `;
@@ -1679,37 +2096,45 @@
     const list = container.querySelector(".ocp-drawer__mount-list");
     if (!list) return;
     if (!Array.isArray(mounts) || mounts.length === 0) {
-      list.innerHTML = `<p class="ocp-drawer__empty-config">No file mounts configured yet.</p>`;
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No workspace folder mappings yet. Choose + to create one.</p>`;
       return;
     }
     list.innerHTML = mounts.map((mount) => {
       const state = mount.state || {};
       const remoteFolder = mount.remote?.path || mount.remote?.share || "";
-      const detail = state.last_error
-        ? escapeHtml(shorten(state.last_error, 180))
-        : `<small>Storage provider folder: ${escapeHtml(remoteFolder || "(root)")}</small><small>Local workspace folder: ${escapeHtml(mount.mount_path || "")}</small>`;
+      const localFolder = localWorkspaceFolderName(mount);
+      const providerName = mount.remote?.rclone_remote || mount.remote?.host || mount.type || "provider";
+      const status = mountStatusLabel(state.status);
       const nextRetry = state.next_retry_at ? `<small>Next retry: ${escapeHtml(state.next_retry_at)}</small>` : "";
-      const isGoogleDrive = mount.type === "google_drive";
-      const isGoogleDriveCopy = isGoogleDrive && mount.options?.sync_mode === "copy";
-      const connectLabel = isGoogleDriveCopy ? "Sync" : "Connect";
-      const disconnectButton = isGoogleDriveCopy ? "" : `<button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="disconnect">Disconnect</button>`;
+      const error = state.last_error ? `<small class="ocp-drawer__link-error">${escapeHtml(shorten(state.last_error, 180))}</small>` : "";
+      const connectLabel = "Connect";
+      const disconnectTitle = "Disconnect workspace folder mapping";
+      const disconnectButton = `<button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="disconnect" aria-label="${disconnectTitle}" title="${disconnectTitle}">⏏</button>`;
       return `
-        <div class="ocp-drawer__config-row ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
-          <span class="ocp-drawer__config-copy">
-            <strong>${escapeHtml(mount.name || mount.id)} · ${escapeHtml(mount.type || "mount")} · ${escapeHtml(mountStatusLabel(state.status))}</strong>
-            ${detail}
-            ${nextRetry}
-          </span>
-          <div class="ocp-drawer__button-row">
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="test">Test</button>
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-action" data-action="connect">${connectLabel}</button>
+        <div class="ocp-drawer__profile-card ocp-drawer__link-card ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
+          <div class="ocp-drawer__link-grid">
+            <span><small>Workspace</small><strong>${escapeHtml(mount.name || mount.id)}</strong></span>
+            <span><small>Local folder</small><strong>${escapeHtml(localFolder || "mount")}</strong></span>
+            <span><small>Remote folder</small><strong>${escapeHtml(remoteFolder || "(root)")}</strong></span>
+            <span><small>Provider</small><strong>${escapeHtml(providerName)}</strong><em>${escapeHtml(mount.type || "mount")} · ${escapeHtml(status)}</em></span>
+          </div>
+          ${error}${nextRetry}
+          <div class="ocp-drawer__profile-card-actions">
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="test" aria-label="Test workspace folder mapping" title="Test workspace folder mapping">✓</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="connect" aria-label="${connectLabel} workspace folder mapping" title="${connectLabel} workspace folder mapping">↻</button>
             ${disconnectButton}
-            <button type="button" class="ocp-drawer__button ocp-drawer__mount-edit">Edit</button>
-            <button type="button" class="ocp-drawer__button ocp-drawer__button--danger ocp-drawer__mount-delete">Delete</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-edit" aria-label="Edit workspace folder mapping" title="Edit workspace folder mapping">✎</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__mount-delete" aria-label="Delete workspace folder mapping" title="Delete workspace folder mapping">×</button>
           </div>
         </div>
       `;
     }).join("");
+  }
+
+  function localWorkspaceFolderName(mount) {
+    const value = mount?.mount_path || mount?.name || "";
+    const parts = String(value).split("/").filter(Boolean);
+    return parts[parts.length - 1] || value;
   }
 
   function renderStorageProviders(container, providers) {
@@ -1724,18 +2149,22 @@
     }
     if (!list) return;
     if (!Array.isArray(providers) || providers.length === 0) {
-      list.innerHTML = `<p class="ocp-drawer__empty-config">No storage providers configured yet.</p>`;
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No provider profiles yet. Choose New Provider to add one.</p>`;
       return;
     }
     list.innerHTML = providers.map((provider) => `
-      <div class="ocp-drawer__config-row ocp-drawer__provider-row" data-provider-id="${escapeHtml(provider.id)}">
-        <span class="ocp-drawer__config-copy">
-          <strong>${escapeHtml(provider.name)} · ${escapeHtml(provider.type)}</strong>
+      <div class="ocp-drawer__profile-card ocp-drawer__provider-row" data-provider-id="${escapeHtml(provider.id)}">
+        <span class="ocp-drawer__profile-card-copy">
+          <strong>${escapeHtml(provider.name)}</strong>
+          <em>${escapeHtml(provider.type)}</em>
           <small>${escapeHtml(provider.remote?.host || provider.remote?.rclone_remote || provider.remote?.share || "Connected provider")}</small>
         </span>
-        <div class="ocp-drawer__button-row">
-          <button type="button" class="ocp-drawer__button ocp-drawer__button--danger ocp-drawer__provider-delete">Delete</button>
+        <div class="ocp-drawer__profile-card-actions">
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-test" aria-label="Test ${escapeHtml(provider.name)}" title="Test storage provider">✓</button>
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-edit" aria-label="Edit ${escapeHtml(provider.name)}" title="Edit storage provider">✎</button>
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__provider-delete" aria-label="Delete ${escapeHtml(provider.name)}" title="Delete storage provider">×</button>
         </div>
+        <small class="ocp-drawer__provider-test-status" hidden></small>
       </div>
     `).join("");
   }
@@ -1745,8 +2174,9 @@
     try {
       const response = await fetchStorageProviders();
       const providers = response.providers || [];
+      container.__ocpStorageProviders = providers;
       renderStorageProviders(container, providers);
-      updateWorkspaceLinkProviderFields(container);
+      updateWorkspaceFolderMappingProviderFields(container);
       return providers;
     } catch (error) {
       if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Storage providers unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
@@ -1754,14 +2184,102 @@
     }
   }
 
-  function beginWorkspaceLinkEdit(container, mount) {
+  function beginStorageProviderEdit(container, provider) {
+    if (!provider) return;
+    showStorageProviderEditor(container);
+    const editId = container.querySelector(".ocp-drawer__provider-edit-id");
+    const nameInput = container.querySelector(".ocp-drawer__provider-name");
+    const typeInput = container.querySelector(".ocp-drawer__provider-type");
+    const hostInput = container.querySelector(".ocp-drawer__provider-host");
+    const portInput = container.querySelector(".ocp-drawer__provider-port");
+    const usernameInput = container.querySelector(".ocp-drawer__provider-username");
+    const passwordInput = container.querySelector(".ocp-drawer__provider-password");
+    const privateKeyInput = container.querySelector(".ocp-drawer__provider-private-key");
+    const tokenInput = container.querySelector(".ocp-drawer__provider-google-token");
+    const clientIdInput = container.querySelector(".ocp-drawer__provider-google-client-id");
+    const clientSecretInput = container.querySelector(".ocp-drawer__provider-google-client-secret");
+    const saveButton = container.querySelector(".ocp-drawer__provider-save");
+    if (editId) editId.value = provider.id || "";
+    if (nameInput) nameInput.value = provider.name || "";
+    if (typeInput) typeInput.value = provider.type || "google_drive";
+    if (hostInput) hostInput.value = provider.remote?.host || provider.remote?.rclone_remote || "";
+    if (portInput) portInput.value = provider.remote?.port || "";
+    if (usernameInput) usernameInput.value = provider.remote?.username || "";
+    showSavedSecretPlaceholder(passwordInput);
+    showSavedSecretPlaceholder(privateKeyInput);
+    showSavedSecretPlaceholder(tokenInput);
+    if (clientIdInput) clientIdInput.value = provider.remote?.client_id || "";
+    showSavedSecretPlaceholder(clientSecretInput);
+    if (saveButton) saveButton.textContent = "Update Provider";
+    container.querySelector(".ocp-drawer__provider-cancel-edit")?.classList.remove("ocp-drawer__mount-field--hidden");
+    const title = container.querySelector(".ocp-drawer__provider-editor-title");
+    if (title) title.textContent = "Edit Storage Provider";
+    const detail = container.querySelector(".ocp-drawer__provider-save-detail");
+    if (detail) detail.textContent = `Editing ${provider.name || provider.id}. Leave password, private key, token, or client secret blank to keep saved secrets.`;
+    updateStorageProviderFields(container);
+  }
+
+  function clearStorageProviderEdit(container) {
+    showStorageProviderEditor(container);
+    const fields = [
+      ".ocp-drawer__provider-edit-id",
+      ".ocp-drawer__provider-name",
+      ".ocp-drawer__provider-host",
+      ".ocp-drawer__provider-port",
+      ".ocp-drawer__provider-username",
+      ".ocp-drawer__provider-password",
+      ".ocp-drawer__provider-private-key",
+      ".ocp-drawer__provider-google-client-id",
+      ".ocp-drawer__provider-google-client-secret",
+      ".ocp-drawer__provider-google-token",
+    ];
+    fields.forEach((selector) => {
+      const field = container.querySelector(selector);
+      if (field?.classList?.contains("ocp-drawer__masked-secret")) {
+        clearSecretField(field);
+      } else if (field) {
+        field.value = "";
+        restorePlaceholder(field);
+      }
+    });
+    const typeInput = container.querySelector(".ocp-drawer__provider-type");
+    if (typeInput) typeInput.value = "google_drive";
+    const saveButton = container.querySelector(".ocp-drawer__provider-save");
+    if (saveButton) saveButton.textContent = "Save Provider";
+    container.querySelector(".ocp-drawer__provider-cancel-edit")?.classList.add("ocp-drawer__mount-field--hidden");
+    const title = container.querySelector(".ocp-drawer__provider-editor-title");
+    if (title) title.textContent = "New Storage Provider";
+    const detail = container.querySelector(".ocp-drawer__provider-save-detail");
+    if (detail) detail.textContent = "Storage providers save reusable account/server details only.";
+    updateStorageProviderFields(container);
+  }
+
+  function showStorageProviderEditor(container) {
+    container.querySelector(".ocp-drawer__profile-shell--providers")?.classList.remove("ocp-drawer__profile-shell--list-only");
+    container.querySelector(".ocp-drawer__profile-shell--providers")?.classList.add("ocp-drawer__profile-shell--editing");
+    const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--providers");
+    if (listPanel) listPanel.hidden = true;
+    const editor = container.querySelector(".ocp-drawer__profile-editor-panel--providers");
+    if (editor) editor.hidden = false;
+  }
+
+  function hideStorageProviderEditor(container) {
+    container.querySelector(".ocp-drawer__profile-shell--providers")?.classList.add("ocp-drawer__profile-shell--list-only");
+    container.querySelector(".ocp-drawer__profile-shell--providers")?.classList.remove("ocp-drawer__profile-shell--editing");
+    const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--providers");
+    if (listPanel) listPanel.hidden = false;
+    const editor = container.querySelector(".ocp-drawer__profile-editor-panel--providers");
+    if (editor) editor.hidden = true;
+  }
+
+  function beginWorkspaceFolderMappingEdit(container, mount) {
     if (!mount) return;
+    showWorkspaceFolderMappingEditor(container);
     const editId = container.querySelector(".ocp-drawer__mount-edit-id");
     const nameInput = container.querySelector(".ocp-drawer__mount-name");
     const pathInput = container.querySelector(".ocp-drawer__mount-path");
     const readOnly = container.querySelector(".ocp-drawer__mount-read-only");
     const autoReconnect = container.querySelector(".ocp-drawer__mount-auto-reconnect");
-    const syncMode = container.querySelector(".ocp-drawer__mount-sync-mode");
     const saveButton = container.querySelector(".ocp-drawer__mount-save");
     const cancelButton = container.querySelector(".ocp-drawer__mount-cancel-edit");
     if (editId) editId.value = mount.id || "";
@@ -1769,20 +2287,46 @@
     if (pathInput) pathInput.value = mount.remote?.path || mount.remote?.share || "";
     if (readOnly) readOnly.checked = Boolean(mount.options?.read_only);
     if (autoReconnect) autoReconnect.checked = Boolean(mount.options?.auto_reconnect);
-    if (syncMode) syncMode.value = mount.options?.sync_mode || "mount";
-    if (saveButton) saveButton.textContent = "Update Workspace Link";
+    if (saveButton) saveButton.textContent = "Update Mapping";
     cancelButton?.classList.remove("ocp-drawer__mount-field--hidden");
+    const title = container.querySelector(".ocp-drawer__mount-editor-title");
+    if (title) title.textContent = "Edit Workspace Folder Mapping";
     const detail = container.querySelector(".ocp-drawer__mount-save-detail");
     if (detail) detail.textContent = `Editing ${mount.name || mount.id}. Update the provider folder or local workspace folder, then save.`;
-    updateWorkspaceLinkProviderFields(container);
+    updateWorkspaceFolderMappingProviderFields(container);
   }
 
-  function clearWorkspaceLinkEdit(container) {
+  function clearWorkspaceFolderMappingEdit(container) {
+    showWorkspaceFolderMappingEditor(container);
     const editId = container.querySelector(".ocp-drawer__mount-edit-id");
     if (editId) editId.value = "";
+    const nameInput = container.querySelector(".ocp-drawer__mount-name");
+    const pathInput = container.querySelector(".ocp-drawer__mount-path");
+    if (nameInput) nameInput.value = "";
+    if (pathInput) pathInput.value = "";
     const saveButton = container.querySelector(".ocp-drawer__mount-save");
-    if (saveButton) saveButton.textContent = "Save Workspace Link";
+    if (saveButton) saveButton.textContent = "Save Mapping";
     container.querySelector(".ocp-drawer__mount-cancel-edit")?.classList.add("ocp-drawer__mount-field--hidden");
+    const title = container.querySelector(".ocp-drawer__mount-editor-title");
+    if (title) title.textContent = "New Workspace Folder Mapping";
+  }
+
+  function showWorkspaceFolderMappingEditor(container) {
+    container.querySelector(".ocp-drawer__profile-shell--links")?.classList.remove("ocp-drawer__profile-shell--list-only");
+    container.querySelector(".ocp-drawer__profile-shell--links")?.classList.add("ocp-drawer__profile-shell--editing");
+    const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--links");
+    if (listPanel) listPanel.hidden = true;
+    const editor = container.querySelector(".ocp-drawer__profile-editor-panel--links");
+    if (editor) editor.hidden = false;
+  }
+
+  function hideWorkspaceFolderMappingEditor(container) {
+    container.querySelector(".ocp-drawer__profile-shell--links")?.classList.add("ocp-drawer__profile-shell--list-only");
+    container.querySelector(".ocp-drawer__profile-shell--links")?.classList.remove("ocp-drawer__profile-shell--editing");
+    const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--links");
+    if (listPanel) listPanel.hidden = false;
+    const editor = container.querySelector(".ocp-drawer__profile-editor-panel--links");
+    if (editor) editor.hidden = true;
   }
 
   async function refreshMounts(container) {
@@ -1832,38 +2376,92 @@
     if (type === "smb") {
       if (hostLabel) hostLabel.textContent = "SMB host";
       if (hostInput) hostInput.placeholder = "nas.local";
-      if (detail) detail.textContent = "Save the SMB server/account here. Choose the share path in Workspace Links.";
+      if (detail) detail.textContent = "Save the SMB server/account here. Choose the share path in Workspace Folder Mapping.";
     } else if (type === "ssh") {
       if (hostLabel) hostLabel.textContent = "Host";
       if (hostInput) hostInput.placeholder = "server.local";
-      if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the remote folder in Workspace Links.";
+      if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the remote folder in Workspace Folder Mapping.";
     } else if (detail) {
-      detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Workspace Links.";
+      detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Workspace Folder Mapping.";
     }
   }
 
-  function updateWorkspaceLinkProviderFields(container) {
+  function updateWorkspaceFolderMappingProviderFields(container) {
     const providerSelect = container.querySelector(".ocp-drawer__mount-provider-select");
     const type = providerSelect?.selectedOptions?.[0]?.dataset?.providerType || "";
     const autoReconnect = container.querySelector(".ocp-drawer__mount-auto-reconnect");
-    const syncMode = container.querySelector(".ocp-drawer__mount-sync-mode");
-    const mode = syncMode?.value || "mount";
     const detail = container.querySelector(".ocp-drawer__mount-save-detail");
-    setMountFieldVisible(container, "sync_mode", type === "google_drive");
+    setMountFieldVisible(container, "browse", type === "google_drive");
     if (!autoReconnect) return;
     if (type === "google_drive") {
-      autoReconnect.disabled = mode === "copy";
-      if (mode === "copy") autoReconnect.checked = false;
+      autoReconnect.disabled = false;
       if (detail && !container.querySelector(".ocp-drawer__mount-edit-id")?.value) {
-        detail.textContent = mode === "copy"
-          ? "Manual copy only runs when you click Sync. It does not live-mount or auto-sync."
-          : "Live mount makes Google Drive appear as a local folder. It requires container FUSE/SYS_ADMIN permissions.";
+        detail.textContent = "Live mount makes Google Drive appear as a local folder. It requires container FUSE/SYS_ADMIN permissions.";
       }
     } else {
       autoReconnect.disabled = false;
       if (detail && !container.querySelector(".ocp-drawer__mount-edit-id")?.value) {
-        detail.textContent = type ? "Save the workspace link, then use Test or Connect below." : "Choose a storage provider first.";
+        detail.textContent = type ? "Save the workspace folder mapping, then use Test or Connect below." : "Choose a storage provider first.";
       }
+    }
+  }
+
+  function renderBrowseFolders(container, providerId, path, folders) {
+    const pathView = container.querySelector(".ocp-drawer__browse-path");
+    const list = container.querySelector(".ocp-drawer__browse-list");
+    if (!pathView || !list) return;
+    const cleanPath = String(path || "").replace(/^\/+|\/+$/g, "");
+    const pathInput = container.querySelector(".ocp-drawer__mount-path");
+    if (pathInput) pathInput.value = cleanPath;
+    pathView.hidden = false;
+    const breadcrumb = cleanPath
+      ? [`<button type="button" class="ocp-drawer__browse-open" data-path="">My Drive</button>`, ...cleanPath.split("/").map((part, index, parts) => {
+        const crumbPath = parts.slice(0, index + 1).join("/");
+        return `<button type="button" class="ocp-drawer__browse-open" data-path="${escapeHtml(crumbPath)}">${escapeHtml(part)}</button>`;
+      })].join("<span>/</span>")
+      : `<strong>My Drive</strong>`;
+    pathView.innerHTML = `<span class="ocp-drawer__browse-path-label">Location</span><span class="ocp-drawer__browse-crumbs">${breadcrumb}</span>`;
+    list.hidden = false;
+    const upPath = cleanPath.split("/").slice(0, -1).join("/");
+    const currentButton = `<div class="ocp-drawer__browse-toolbar"><button type="button" class="ocp-drawer__button ocp-drawer__browse-select" data-path="${escapeHtml(cleanPath)}">Choose this folder</button></div>`;
+    const upRow = cleanPath ? `<button type="button" class="ocp-drawer__browse-row ocp-drawer__browse-open" data-path="${escapeHtml(upPath)}"><span class="ocp-drawer__browse-icon">↰</span><strong>Parent folder</strong><small>${escapeHtml(upPath || "My Drive")}</small></button>` : "";
+    if (!Array.isArray(folders) || folders.length === 0) {
+      list.innerHTML = `${currentButton}${upRow}<p class="ocp-drawer__browse-empty">This folder has no subfolders. Choose this folder or type a path manually.</p>`;
+      return;
+    }
+    list.innerHTML = `${currentButton}${upRow}${folders.map((folder) => {
+      const folderPath = folder.path || folder.name || "";
+      return `<div class="ocp-drawer__browse-row"><button type="button" class="ocp-drawer__browse-folder ocp-drawer__browse-open" data-path="${escapeHtml(folderPath)}"><span class="ocp-drawer__browse-icon">📁</span><strong>${escapeHtml(folder.name || folderPath)}</strong><small>${escapeHtml(folderPath)}</small></button><button type="button" class="ocp-drawer__button ocp-drawer__browse-select" data-path="${escapeHtml(folderPath)}">Choose</button></div>`;
+    }).join("")}`;
+    list.dataset.providerId = providerId;
+    list.dataset.path = cleanPath;
+  }
+
+  async function loadBrowseFolders(container, path = "") {
+    const providerSelect = container.querySelector(".ocp-drawer__mount-provider-select");
+    const providerId = providerSelect?.value || "";
+    const list = container.querySelector(".ocp-drawer__browse-list");
+    const pathView = container.querySelector(".ocp-drawer__browse-path");
+    if (!providerId) {
+      if (list) {
+        list.hidden = false;
+        list.innerHTML = `<p class="ocp-drawer__browse-empty">Choose a storage provider first.</p>`;
+      }
+      return;
+    }
+    if (pathView) {
+      pathView.hidden = false;
+      pathView.textContent = "Loading folders...";
+    }
+    if (list) {
+      list.hidden = false;
+      list.innerHTML = `<p class="ocp-drawer__browse-empty">Loading...</p>`;
+    }
+    try {
+      const response = await browseStorageProvider(providerId, path);
+      renderBrowseFolders(container, providerId, response.path || path, response.folders || []);
+    } catch (error) {
+      if (list) list.innerHTML = `<p class="ocp-drawer__browse-empty">Browse failed: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
     }
   }
 
@@ -1929,23 +2527,49 @@
   }
 
   function setupMountManagerControls(container) {
+    setupMaskedSecretFields(container);
     refreshMounts(container);
     refreshStorageProviders(container);
     updateStorageProviderFields(container);
     refreshGoogleDriveAccounts(container);
     container.querySelector(".ocp-drawer__provider-type")?.addEventListener("change", () => updateStorageProviderFields(container));
-    container.querySelector(".ocp-drawer__mount-provider-select")?.addEventListener("change", () => updateWorkspaceLinkProviderFields(container));
-    container.querySelector(".ocp-drawer__mount-sync-mode")?.addEventListener("change", () => updateWorkspaceLinkProviderFields(container));
+    container.querySelector(".ocp-drawer__mount-provider-select")?.addEventListener("change", () => {
+      updateWorkspaceFolderMappingProviderFields(container);
+      const list = container.querySelector(".ocp-drawer__browse-list");
+      const pathView = container.querySelector(".ocp-drawer__browse-path");
+      if (list) {
+        list.hidden = true;
+        list.innerHTML = "";
+      }
+      if (pathView) {
+        pathView.hidden = true;
+        pathView.textContent = "";
+      }
+    });
+    container.querySelector(".ocp-drawer__browse-load")?.addEventListener("click", () => loadBrowseFolders(container, container.querySelector(".ocp-drawer__mount-path")?.value || ""));
+    container.querySelector(".ocp-drawer__provider-new")?.addEventListener("click", () => clearStorageProviderEdit(container));
+    container.querySelector(".ocp-drawer__provider-cancel-edit")?.addEventListener("click", () => {
+      clearStorageProviderEdit(container);
+      hideStorageProviderEditor(container);
+    });
+    container.querySelector(".ocp-drawer__mount-new")?.addEventListener("click", () => {
+      clearWorkspaceFolderMappingEdit(container);
+      const detail = container.querySelector(".ocp-drawer__mount-save-detail");
+      if (detail) detail.textContent = "Choose a storage provider first.";
+      updateWorkspaceFolderMappingProviderFields(container);
+    });
     container.querySelector(".ocp-drawer__provider-save")?.addEventListener("click", async () => {
       const detail = container.querySelector(".ocp-drawer__provider-save-detail");
       const type = container.querySelector(".ocp-drawer__provider-type")?.value || "google_drive";
       const name = container.querySelector(".ocp-drawer__provider-name")?.value || "";
+      const editId = container.querySelector(".ocp-drawer__provider-edit-id")?.value || "";
+      const existingProvider = editId ? (container.__ocpStorageProviders || []).find((provider) => provider.id === editId) : null;
       const host = container.querySelector(".ocp-drawer__provider-host")?.value || "";
       const port = container.querySelector(".ocp-drawer__provider-port")?.value || "";
       const username = container.querySelector(".ocp-drawer__provider-username")?.value || "";
       const password = container.querySelector(".ocp-drawer__provider-password")?.value || "";
-      const privateKey = container.querySelector(".ocp-drawer__provider-private-key")?.value || "";
-      const token = container.querySelector(".ocp-drawer__provider-google-token")?.value || "";
+      const privateKey = secretFieldValue(container.querySelector(".ocp-drawer__provider-private-key"));
+      const token = secretFieldValue(container.querySelector(".ocp-drawer__provider-google-token"));
       const clientId = container.querySelector(".ocp-drawer__provider-google-client-id")?.value || "";
       const clientSecret = container.querySelector(".ocp-drawer__provider-google-client-secret")?.value || "";
       const remote = {};
@@ -1954,13 +2578,23 @@
       try {
         if (type === "google_drive") {
           providerName = name || "gdrive";
+          if (!editId && !token.trim()) {
+            if (detail) detail.textContent = "Paste the authorization token JSON from rclone authorize before saving.";
+            return;
+          }
+          if ((!editId || token.trim()) && (!clientId.trim() || !clientSecret.trim())) {
+            if (detail) detail.textContent = "Google OAuth Client ID and Client Secret are required for Google Drive providers.";
+            return;
+          }
           if (token.trim()) {
             if (detail) detail.textContent = "Connecting Google Drive account...";
             const response = await connectGoogleDriveAccount({ name: providerName, token, clientId, clientSecret });
             providerName = response.account || providerName;
           }
-          remote.rclone_remote = providerName;
-          remote.host = providerName;
+          const remoteName = token.trim() ? providerName : (existingProvider?.remote?.rclone_remote || existingProvider?.remote?.host || providerName);
+          remote.rclone_remote = remoteName;
+          remote.host = remoteName;
+          if (clientId.trim()) remote.client_id = clientId.trim();
         } else if (type === "ssh") {
           remote.host = host;
           remote.port = port;
@@ -1975,10 +2609,16 @@
           secret.password = password;
         }
         if (detail) detail.textContent = "Saving storage provider...";
-        await createStorageProvider({ name: providerName, type, remote, secret });
-        container.querySelector(".ocp-drawer__provider-google-token").value = "";
+        if (editId) {
+          await updateStorageProvider(editId, { name: providerName, type, remote, secret });
+        } else {
+          await createStorageProvider({ name: providerName, type, remote, secret });
+        }
+        clearStorageProviderEdit(container);
+        hideStorageProviderEditor(container);
+        clearSecretField(container.querySelector(".ocp-drawer__provider-google-token"));
         container.querySelector(".ocp-drawer__provider-google-client-secret").value = "";
-        if (detail) detail.textContent = "Storage provider saved.";
+        if (detail) detail.textContent = editId ? "Storage provider updated." : "Storage provider saved.";
         await refreshStorageProviders(container);
       } catch (error) {
         if (detail) detail.textContent = `Provider save failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1992,15 +2632,15 @@
       const name = container.querySelector(".ocp-drawer__mount-name")?.value || "";
       const remotePath = container.querySelector(".ocp-drawer__mount-path")?.value || "";
       const readOnly = Boolean(container.querySelector(".ocp-drawer__mount-read-only")?.checked);
-      const syncMode = type === "google_drive" ? (container.querySelector(".ocp-drawer__mount-sync-mode")?.value || "mount") : "";
-      const autoReconnect = type === "google_drive" && syncMode === "copy" ? false : Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
+      const syncMode = type === "google_drive" ? "mount" : "";
+      const autoReconnect = Boolean(container.querySelector(".ocp-drawer__mount-auto-reconnect")?.checked);
       const editId = container.querySelector(".ocp-drawer__mount-edit-id")?.value || "";
       const remote = { path: remotePath, share: remotePath };
       if (!providerId) {
         if (detail) detail.textContent = "Save a storage provider first.";
         return;
       }
-      if (detail) detail.textContent = "Saving workspace link...";
+      if (detail) detail.textContent = "Saving workspace folder mapping...";
       try {
         const payload = {
           name,
@@ -2017,27 +2657,79 @@
         } else {
           await createMount(payload);
         }
-        clearWorkspaceLinkEdit(container);
-        if (detail) detail.textContent = editId ? "Workspace link updated." : "Workspace link saved. Use Sync or Connect below.";
+        clearWorkspaceFolderMappingEdit(container);
+        hideWorkspaceFolderMappingEditor(container);
+        if (detail) detail.textContent = editId ? "Workspace folder mapping updated." : "Workspace folder mapping saved. Use Connect below.";
         await refreshMounts(container);
       } catch (error) {
         if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     });
     container.querySelector(".ocp-drawer__mount-cancel-edit")?.addEventListener("click", () => {
-      clearWorkspaceLinkEdit(container);
+      clearWorkspaceFolderMappingEdit(container);
+      hideWorkspaceFolderMappingEditor(container);
       container.querySelector(".ocp-drawer__mount-save-detail").textContent = "Choose a storage provider first.";
     });
     container.addEventListener("click", async (event) => {
       const providerRow = event.target?.closest?.(".ocp-drawer__provider-row");
+      if (providerRow && event.target.closest?.(".ocp-drawer__provider-edit")) {
+        beginStorageProviderEdit(container, (container.__ocpStorageProviders || []).find((provider) => provider.id === providerRow.dataset.providerId));
+        return;
+      }
+      if (providerRow && event.target.closest?.(".ocp-drawer__provider-test")) {
+        const button = event.target.closest(".ocp-drawer__provider-test");
+        const statusLine = providerRow.querySelector(".ocp-drawer__provider-test-status");
+        const original = button?.textContent || "✓";
+        if (button) {
+          button.disabled = true;
+          button.textContent = "…";
+        }
+        if (statusLine) {
+          statusLine.hidden = false;
+          statusLine.classList.remove("ocp-drawer__provider-test-status--ok", "ocp-drawer__provider-test-status--error");
+          statusLine.textContent = "Testing provider...";
+        }
+        try {
+          const result = await testStorageProvider(providerRow.dataset.providerId);
+          const status = result?.status || {};
+          const ok = result?.ok || status.status === "connected";
+          if (statusLine) {
+            statusLine.classList.toggle("ocp-drawer__provider-test-status--ok", ok);
+            statusLine.classList.toggle("ocp-drawer__provider-test-status--error", !ok);
+            statusLine.textContent = ok ? "Provider test passed." : `Provider test failed: ${status.last_error || mountStatusLabel(status.status || "error")}`;
+          }
+        } catch (error) {
+          if (statusLine) {
+            statusLine.classList.add("ocp-drawer__provider-test-status--error");
+            statusLine.textContent = `Provider test failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        } finally {
+          if (button) {
+            button.disabled = false;
+            button.textContent = original;
+          }
+        }
+        return;
+      }
       if (providerRow && event.target.closest?.(".ocp-drawer__provider-delete")) {
-        if (!window.confirm("Delete this storage provider? Workspace links will not be deleted.")) return;
+          if (!window.confirm("Delete this storage provider? Workspace folder mappings will not be deleted.")) return;
         try {
           await deleteStorageProvider(providerRow.dataset.providerId);
           await refreshStorageProviders(container);
         } catch (error) {
           window.alert(`Provider delete failed: ${error instanceof Error ? error.message : String(error)}`);
         }
+        return;
+      }
+      const browseOpen = event.target.closest?.(".ocp-drawer__browse-open");
+      if (browseOpen) {
+        await loadBrowseFolders(container, browseOpen.dataset.path || "");
+        return;
+      }
+      const browseSelect = event.target.closest?.(".ocp-drawer__browse-select");
+      if (browseSelect) {
+        const pathInput = container.querySelector(".ocp-drawer__mount-path");
+        if (pathInput) pathInput.value = browseSelect.dataset.path || "";
         return;
       }
       const row = event.target?.closest?.(".ocp-drawer__mount-row");
@@ -2050,23 +2742,27 @@
       try {
         if (editButton) {
           const mounts = await refreshMounts(container);
-          beginWorkspaceLinkEdit(container, mounts.find((item) => item.id === id));
+          beginWorkspaceFolderMappingEdit(container, mounts.find((item) => item.id === id));
           return;
         } else if (deleteButton) {
           if (!window.confirm("Delete this mount configuration? The remote files will not be deleted.")) return;
           await deleteMount(id);
         } else if (actionButton) {
           const action = actionButton.dataset.action;
-          const label = action === "test" ? "Testing Workspace Link" : action === "connect" ? (actionButton.textContent.trim() || "Running Workspace Link") : "Updating Workspace Link";
-          const overlay = showWorkspaceLinkOverlay(document.querySelector("#opencode-plus-drawer"), label, action === "test" ? "Checking the provider and remote folder..." : "Starting the workspace link action...");
-          const result = await mountAction(id, action);
-          await refreshMountsUntilSettled(container, id);
-          if (action === "test") {
-            const status = result?.status || {};
-            const ok = result?.ok || status.status === "connected" || status.status === "synced";
-            finishWorkspaceLinkOverlay(overlay, ok ? "Test Passed" : "Test Failed", ok ? "The provider and remote folder are reachable." : (status.last_error || `Status: ${mountStatusLabel(status.status || "error")}`));
-          } else {
-            finishWorkspaceLinkOverlay(overlay, "Action Complete", "Workspace link status has been refreshed.");
+          const label = action === "test" ? "Testing Workspace Folder Mapping" : action === "connect" ? (actionButton.textContent.trim() || "Running Workspace Folder Mapping") : "Updating Workspace Folder Mapping";
+          const overlay = showWorkspaceFolderMappingOverlay(document.querySelector("#opencode-plus-drawer"), label, action === "test" ? "Checking the provider and remote folder..." : "Starting the workspace folder mapping action...");
+          try {
+            const result = await mountAction(id, action);
+            await refreshMountsUntilSettled(container, id);
+            if (action === "test") {
+              const status = result?.status || {};
+              const ok = result?.ok || status.status === "connected" || status.status === "synced";
+              finishWorkspaceFolderMappingOverlay(overlay, ok ? "Test Passed" : "Test Failed", ok ? "The provider and remote folder are reachable." : (status.last_error || `Status: ${mountStatusLabel(status.status || "error")}`));
+            } else {
+              finishWorkspaceFolderMappingOverlay(overlay, "Action Complete", "Workspace folder mapping status has been refreshed.");
+            }
+          } catch (error) {
+            finishWorkspaceFolderMappingOverlay(overlay, action === "test" ? "Test Failed" : "Action Failed", error instanceof Error ? error.message : String(error));
           }
           return;
         } else {
@@ -2145,7 +2841,7 @@
         <p class="ocp-drawer__field-detail ocp-drawer__gemini-auth-source-detail">Checking auth source...</p>
         <label>
           <span>Gemini OAuth Credentials JSON</span>
-          <textarea class="ocp-drawer__field ocp-drawer__gemini-creds" autocomplete="off" spellcheck="false" placeholder='{"refresh_token":"..."}'></textarea>
+          <textarea class="ocp-drawer__field ocp-drawer__gemini-creds ocp-drawer__masked-secret" autocomplete="off" spellcheck="false" placeholder='{"refresh_token":"..."}'></textarea>
         </label>
         <button type="button" class="ocp-drawer__button ocp-drawer__provider-save" data-provider="gemini">Save Gemini</button>
         <span class="ocp-drawer__provider-status" data-provider="gemini">Not saved</span>
@@ -2170,7 +2866,7 @@
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
-    modal.classList.remove("ocp-drawer__modal--help");
+    modal.classList.remove("ocp-drawer__modal--help", "ocp-drawer__modal--storage");
     title.textContent = `Configure ${module.label}`;
 
     if (module.id === "openai" || module.id === "openrouter" || module.id === "gemini" || module.id === "claude" || module.id === "xai") {
@@ -2238,18 +2934,41 @@
     `;
   }
 
+  function collapseSettingsSections(container) {
+    container.querySelectorAll(".ocp-drawer__system-section").forEach((section) => {
+      if (section.dataset.collapsibleReady === "true") return;
+      const heading = Array.from(section.children).find((child) => child.tagName === "H4");
+      if (!heading) return;
+      const details = document.createElement("details");
+      Array.from(section.attributes).forEach((attribute) => details.setAttribute(attribute.name, attribute.value));
+      details.dataset.collapsibleReady = "true";
+      const summary = document.createElement("summary");
+      summary.className = "ocp-drawer__system-section-summary";
+      summary.textContent = heading.textContent || "Settings";
+      const content = document.createElement("div");
+      content.className = "ocp-drawer__system-section-content";
+      Array.from(section.childNodes).forEach((node) => {
+        if (node !== heading) content.append(node);
+      });
+      details.append(summary, content);
+      section.replaceWith(details);
+    });
+  }
+
   function openConfigArea(root, area, settings) {
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
-    modal.classList.remove("ocp-drawer__modal--help");
+    modal.classList.remove("ocp-drawer__modal--help", "ocp-drawer__modal--storage");
     title.textContent = area.label;
 
     if (area.id === "restart") {
       body.innerHTML = restartConfigMarkup();
+      collapseSettingsSections(body);
       setupRestartControls(body);
     } else if (area.id === "system") {
       body.innerHTML = systemConfigMarkup();
+      collapseSettingsSections(body);
       setupSystemControls(root, body, settings);
     } else if (area.id === "gateway") {
       body.innerHTML = gatewayConfigMarkup();
@@ -2262,14 +2981,20 @@
       });
     } else if (area.id === "hidden") {
       body.innerHTML = hiddenSettingsMarkup(settings);
+      collapseSettingsSections(body);
       setupHiddenSettingsControls(body);
     } else if (area.id === "soul") {
+      modal.classList.add("ocp-drawer__modal--storage");
       body.innerHTML = soulSyncMarkup();
-      setupSoulSyncControls(body);
+      collapseSettingsSections(body);
+      setupSoulSyncControls(body, root, settings);
+      setupMountManagerControls(body);
     } else if (area.id === "storage-providers") {
+      modal.classList.add("ocp-drawer__modal--storage");
       body.innerHTML = mountManagerMarkup("providers");
       setupMountManagerControls(body);
     } else if (area.id === "workspace-links") {
+      modal.classList.add("ocp-drawer__modal--storage");
       body.innerHTML = mountManagerMarkup("links");
       setupMountManagerControls(body);
     } else {
@@ -2284,6 +3009,7 @@
     const modal = root.querySelector(".ocp-drawer__modal");
     const title = modal.querySelector(".ocp-drawer__modal-title");
     const body = modal.querySelector(".ocp-drawer__modal-body");
+    modal.classList.remove("ocp-drawer__modal--storage");
     modal.classList.add("ocp-drawer__modal--help");
     title.textContent = "OpenCode Plus Help";
     body.innerHTML = `

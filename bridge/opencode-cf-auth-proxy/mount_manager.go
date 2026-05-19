@@ -82,9 +82,9 @@ type storageProvider struct {
 }
 
 type mountOptions struct {
-	ReadOnly      bool `json:"read_only"`
-	AutoConnect   bool `json:"auto_connect"`
-	AutoReconnect bool `json:"auto_reconnect"`
+	ReadOnly      bool   `json:"read_only"`
+	AutoConnect   bool   `json:"auto_connect"`
+	AutoReconnect bool   `json:"auto_reconnect"`
 	SyncMode      string `json:"sync_mode,omitempty"`
 }
 
@@ -195,18 +195,59 @@ func (m *mountManager) ProviderCollectionHandler() http.HandlerFunc {
 
 func (m *mountManager) ProviderItemHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/storage-providers/"), "/")
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/storage-providers/"), "/"), "/")
+		id := ""
+		action := ""
+		if len(parts) > 0 {
+			id = parts[0]
+		}
+		if len(parts) > 1 {
+			action = parts[1]
+		}
 		if id == "" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		switch r.Method {
-		case http.MethodDelete:
+		switch {
+		case (r.Method == http.MethodGet || r.Method == http.MethodHead) && action == "":
+			m.mu.Lock()
+			if _, ok := m.providers[id]; !ok {
+				m.mu.Unlock()
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "provider_not_found"})
+				return
+			}
+			provider := m.providerSnapshotLocked(id)
+			m.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": provider})
+		case (r.Method == http.MethodPut || r.Method == http.MethodPatch) && action == "":
+			defer r.Body.Close()
+			var request providerCreateRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&request); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+				return
+			}
+			provider, err := m.updateProvider(id, request)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider_update_failed", "detail": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": provider})
+		case r.Method == http.MethodDelete && action == "":
 			if err := m.deleteProvider(id); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider_delete_failed", "detail": err.Error()})
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		case r.Method == http.MethodPost && action == "test":
+			result := m.testProvider(id)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": result.Status == mountStatusConnected, "status": result})
+		case r.Method == http.MethodGet && action == "browse":
+			folders, err := m.browseProvider(id, r.URL.Query().Get("path"))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider_browse_failed", "detail": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": strings.Trim(strings.TrimSpace(r.URL.Query().Get("path")), "/"), "folders": folders})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -411,6 +452,47 @@ func (m *mountManager) createProvider(request providerCreateRequest) (map[string
 	return m.providerSnapshotLocked(provider.ID), nil
 }
 
+func (m *mountManager) updateProvider(id string, request providerCreateRequest) (map[string]any, error) {
+	providerType := normalizeMountType(request.Type)
+	if providerType == "" {
+		return nil, errors.New("unsupported_provider_type")
+	}
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		name = providerType
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old, ok := m.providers[id]
+	if !ok {
+		return nil, errors.New("provider_not_found")
+	}
+	oldSecret := m.secrets[id]
+	secret := oldSecret
+	if strings.TrimSpace(request.Secret.Username) != "" {
+		secret.Username = request.Secret.Username
+	}
+	if strings.TrimSpace(request.Secret.Password) != "" {
+		secret.Password = request.Secret.Password
+	}
+	if strings.TrimSpace(request.Secret.PrivateKey) != "" {
+		secret.PrivateKey = request.Secret.PrivateKey
+	}
+	remote := trimStringMap(request.Remote)
+	if len(remote) == 0 {
+		remote = old.Remote
+	}
+	m.providers[id] = storageProvider{ID: id, Name: name, Type: providerType, Remote: remote, CreatedAt: old.CreatedAt, UpdatedAt: now}
+	m.secrets[id] = secret
+	if err := m.saveLocked(); err != nil {
+		m.providers[id] = old
+		m.secrets[id] = oldSecret
+		return nil, err
+	}
+	return m.providerSnapshotLocked(id), nil
+}
+
 func (m *mountManager) deleteProvider(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -471,11 +553,17 @@ func (m *mountManager) providerSecret(id string) mountSecret {
 
 func (m *mountManager) providerSnapshotLocked(id string) map[string]any {
 	provider := m.providers[id]
+	remote := redactRemote(provider.Remote)
+	if provider.Type == "google_drive" && strings.TrimSpace(remote["client_id"]) == "" {
+		if clientID := rcloneConfigValue(rcloneRemoteName(mountConfig{Remote: provider.Remote}), "client_id"); clientID != "" {
+			remote["client_id"] = clientID
+		}
+	}
 	return map[string]any{
 		"id":         provider.ID,
 		"name":       provider.Name,
 		"type":       provider.Type,
-		"remote":     redactRemote(provider.Remote),
+		"remote":     remote,
 		"created_at": provider.CreatedAt,
 		"updated_at": provider.UpdatedAt,
 	}
@@ -660,6 +748,108 @@ func (m *mountManager) test(id string) mountRuntimeState {
 		return m.testGoogleDriveMount(config)
 	}
 	return probeRemote(config, secret, 12*time.Second)
+}
+
+func (m *mountManager) testProvider(id string) mountRuntimeState {
+	m.mu.Lock()
+	provider, ok := m.providers[id]
+	secret := m.secrets[id]
+	m.mu.Unlock()
+	if !ok {
+		return mountRuntimeState{Status: mountStatusError, LastError: "provider_not_found"}
+	}
+	config := mountConfig{ID: provider.ID, Name: provider.Name, Type: provider.Type, Remote: provider.Remote}
+	if provider.Type == "google_drive" {
+		return testGoogleDriveProvider(config)
+	}
+	return probeRemote(config, secret, 12*time.Second)
+}
+
+func testGoogleDriveProvider(config mountConfig) mountRuntimeState {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := exec.LookPath("rclone"); err != nil {
+		return mountRuntimeState{Status: mountStatusError, LastError: "rclone_not_installed", LastCheckedAt: now}
+	}
+	remoteName := rcloneRemoteName(config)
+	if remoteName == "" {
+		return mountRuntimeState{Status: mountStatusError, LastError: "rclone_remote_required", LastCheckedAt: now}
+	}
+	cmd := exec.CommandContext(ctx, "rclone", "about", remoteName+":", "--retries", "1", "--low-level-retries", "1")
+	cmd.Env = rcloneEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		status := classifyMountError(err)
+		if ctx.Err() != nil {
+			status = mountStatusTimeout
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return mountRuntimeState{Status: status, LastError: redactProviderError(errors.New(detail)), LastCheckedAt: now}
+	}
+	return mountRuntimeState{Status: mountStatusConnected, LastCheckedAt: now}
+}
+
+func (m *mountManager) browseProvider(id, folderPath string) ([]map[string]string, error) {
+	m.mu.Lock()
+	provider, ok := m.providers[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, errors.New("provider_not_found")
+	}
+	if provider.Type != "google_drive" {
+		return nil, errors.New("browse_supported_for_google_drive_only")
+	}
+	remoteName := rcloneRemoteName(mountConfig{Remote: provider.Remote})
+	if remoteName == "" {
+		return nil, errors.New("rclone_remote_required")
+	}
+	path := strings.Trim(strings.TrimSpace(folderPath), "/")
+	remote := remoteName + ":"
+	if path != "" {
+		remote += path
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rclone", "lsjson", remote, "--dirs-only", "--max-depth", "1", "--retries", "1", "--low-level-retries", "1")
+	cmd.Env = rcloneEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, errors.New("browse_timeout")
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, errors.New(redactProviderError(errors.New(detail)))
+	}
+	var entries []struct {
+		Name  string `json:"Name"`
+		Path  string `json:"Path"`
+		IsDir bool   `json:"IsDir"`
+	}
+	if err := json.Unmarshal(output, &entries); err != nil {
+		return nil, errors.New("invalid_rclone_browse_output")
+	}
+	folders := []map[string]string{}
+	for _, entry := range entries {
+		if !entry.IsDir {
+			continue
+		}
+		entryPath := strings.Trim(strings.TrimSpace(entry.Path), "/")
+		if entryPath == "" && entry.Name != "" {
+			entryPath = strings.Trim(strings.TrimSpace(entry.Name), "/")
+		}
+		if path != "" && entryPath != "" && !strings.Contains(entryPath, "/") {
+			entryPath = path + "/" + entryPath
+		}
+		folders = append(folders, map[string]string{"name": entry.Name, "path": entryPath})
+	}
+	return folders, nil
 }
 
 func (m *mountManager) testGoogleDriveMount(config mountConfig) mountRuntimeState {
@@ -1169,7 +1359,11 @@ func saveGoogleDriveRemote(name, token, clientID, clientSecret string) error {
 	if err := os.MkdirAll(filepath.Dir(rcloneConfigFile), 0o700); err != nil {
 		return err
 	}
-	args := []string{"config", "create", name, "drive", "config_is_local=false"}
+	deleteExisting := exec.Command("rclone", "config", "delete", name)
+	deleteExisting.Env = rcloneEnv()
+	_ = deleteExisting.Run()
+
+	args := []string{"config", "create", name, "drive", "config_is_local=false", "token", token}
 	if strings.TrimSpace(clientID) != "" {
 		args = append(args, "client_id", strings.TrimSpace(clientID))
 	}
@@ -1180,17 +1374,7 @@ func saveGoogleDriveRemote(name, token, clientID, clientSecret string) error {
 	create := exec.Command("rclone", args...)
 	create.Env = rcloneEnv()
 	if output, err := create.CombinedOutput(); err != nil {
-		return fmt.Errorf("start auth config: %s", strings.TrimSpace(string(output)))
-	}
-	connect := exec.Command("rclone", "config", "create", name, "drive", "--continue", "--state", "*oauth-authorize,teamdrive,,", "--result", token, "--non-interactive")
-	connect.Env = rcloneEnv()
-	if output, err := connect.CombinedOutput(); err != nil {
-		return fmt.Errorf("store auth token: %s", strings.TrimSpace(string(output)))
-	}
-	finish := exec.Command("rclone", "config", "create", name, "drive", "--continue", "--state", "teamdrive_ok", "--result", "false", "--non-interactive")
-	finish.Env = rcloneEnv()
-	if output, err := finish.CombinedOutput(); err != nil {
-		return fmt.Errorf("finish auth config: %s", strings.TrimSpace(string(output)))
+		return fmt.Errorf("store Google Drive config: %s", strings.TrimSpace(string(output)))
 	}
 	_ = os.Chmod(rcloneConfigFile, 0o600)
 	return nil
@@ -1202,6 +1386,37 @@ func rcloneRemoteName(config mountConfig) string {
 		remoteName = strings.TrimSpace(config.Remote["host"])
 	}
 	return strings.TrimSuffix(remoteName, ":")
+}
+
+func rcloneConfigValue(remoteName, key string) string {
+	remoteName = strings.TrimSpace(strings.TrimSuffix(remoteName, ":"))
+	key = strings.TrimSpace(key)
+	if remoteName == "" || key == "" {
+		return ""
+	}
+	data, err := os.ReadFile(rcloneConfigFile)
+	if err != nil {
+		return ""
+	}
+	inSection := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inSection = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]") == remoteName
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		left, right, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(left) == key {
+			return strings.TrimSpace(right)
+		}
+	}
+	return ""
 }
 
 func normalizeMountType(value string) string {
@@ -1271,15 +1486,32 @@ func redactError(err error) string {
 		return "Google Drive API quota/rate limit exceeded while checking this folder. Wait a few minutes and try again, or reconnect the provider with your own Google OAuth Client ID/Secret."
 	}
 	if strings.Contains(text, "couldn't find root directory ID") {
-		return "Google Drive could not find or access that remote folder. Check the Workspace Link remote folder spelling and that the connected account can open it."
+		return "Google Drive could not find or access that remote folder. Check the Workspace Folder Mapping remote folder spelling and that the connected account can open it."
 	}
 	if strings.Contains(text, "failed to mount FUSE") || strings.Contains(text, "fusermount") {
-		return "This provider requires a filesystem mount, but the container does not have FUSE permission. Google Drive links should use Sync instead."
+		return "This provider requires a filesystem mount, but the container does not have FUSE permission. Enable FUSE/SYS_ADMIN for Google Drive workspace folder mappings."
 	}
 	if len(text) > 500 {
 		text = text[:500]
 	}
 	return text
+}
+
+func redactProviderError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if strings.Contains(text, "drive.googleapis.com") && strings.Contains(text, "RATE_LIMIT_EXCEEDED") {
+		return "Google Drive API quota/rate limit exceeded while checking this account. Wait a few minutes and try again."
+	}
+	if strings.Contains(text, "invalid_grant") {
+		return "Google rejected this OAuth refresh token. Generate a fresh token with the exact same OAuth Client ID and Client Secret entered here, then re-add the provider."
+	}
+	if strings.Contains(text, "couldn't find root directory ID") {
+		return "Google Drive could not access this account root. Re-authorize the provider and try again."
+	}
+	return redactError(err)
 }
 
 func classifyMountError(err error) string {

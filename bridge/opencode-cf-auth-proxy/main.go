@@ -63,6 +63,9 @@ type plusConfig struct {
 	GeminiAuthSource    string `json:"gemini_auth_source"`
 	OpenAIAuthSource    string `json:"openai_auth_source"`
 	AnthropicAuthSource string `json:"anthropic_auth_source"`
+	InstanceName        string `json:"instance_name"`
+	SoulDBEnabled       *bool  `json:"soul_db_enabled,omitempty"`
+	SoulPBURL           string `json:"soul_pb_url"`
 }
 
 type providerSecrets struct {
@@ -195,8 +198,10 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/secrets/provider/xai", protectedHandler(auth, cfg, cache, secretsProviderHandler(cfg, "xai")))
 	mux.HandleFunc("/__opencode-plus/config", configHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/soul/status", soulStatusHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/soul/project", protectedHandler(auth, cfg, cache, soulProjectHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/config", openCodeConfigHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
+	mux.HandleFunc("/__opencode-plus/gateway/restart", protectedHandler(auth, cfg, cache, restartGatewayHandler()))
 	mux.HandleFunc("/__opencode-plus/opencode/update/check", updateOpenCodeCheckHandler())
 	mux.HandleFunc("/__opencode-plus/opencode/update", protectedHandler(auth, cfg, cache, updateOpenCodeHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/update/status", updateOpenCodeStatusHandler())
@@ -318,6 +323,21 @@ func loadConfig() (config, error) {
 		DeploymentName:      env("OPENCODE_PLUS_DEPLOYMENT_NAME", env("HOSTNAME", "OpenCode Plus")),
 		DeploymentIDStable:  strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_ID")) != "",
 		SourceRepoDir:       env("OPENCODE_PLUS_SOURCE_REPO_DIR", "/root/gitrepos/opencode-ubuntu-container"),
+	}
+	plusCfg := readPlusConfig(cfg)
+	if plusCfg.SoulDBEnabled != nil && strings.TrimSpace(os.Getenv("OPENCODE_PLUS_SOUL_DB_ENABLED")) == "" {
+		cfg.SoulDBEnabled = *plusCfg.SoulDBEnabled
+	}
+	if plusCfg.SoulPBURL != "" && strings.TrimSpace(os.Getenv("OPENCODE_PLUS_SOUL_PB_URL")) == "" {
+		cfg.SoulPBURL = plusCfg.SoulPBURL
+	}
+	configuredInstanceName := plusCfg.InstanceName
+	if configuredInstanceName != "" && strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_ID")) == "" {
+		cfg.DeploymentID = configuredInstanceName
+		cfg.DeploymentName = configuredInstanceName
+		cfg.DeploymentIDStable = true
+	} else if configuredInstanceName != "" && strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_NAME")) == "" {
+		cfg.DeploymentName = configuredInstanceName
 	}
 
 	allowed := strings.Split(os.Getenv("ALLOWED_EMAILS"), ",")
@@ -648,13 +668,14 @@ func soulStatusHandler(cfg config) http.HandlerFunc {
 			"synced_projects": "not initialized",
 		}
 		status := map[string]any{
-			"ok":                true,
-			"enabled":           cfg.SoulDBEnabled,
-			"ready":             false,
-			"state":             mapBool(cfg.SoulDBEnabled, "checking", "disabled"),
-			"schema_ready":      false,
-			"named_space_count": 0,
-			"deployment":        deploymentStatus(cfg, r),
+			"ok":                 true,
+			"enabled":            cfg.SoulDBEnabled,
+			"ready":              false,
+			"state":              mapBool(cfg.SoulDBEnabled, "checking", "disabled"),
+			"schema_ready":       false,
+			"named_space_count":  0,
+			"project_registered": false,
+			"deployment":         deploymentStatus(cfg, r),
 			"pocketbase": map[string]any{
 				"url":       cfg.SoulPBURL,
 				"connected": false,
@@ -691,8 +712,85 @@ func soulStatusHandler(cfg config) http.HandlerFunc {
 		}
 		if connected && schemaReady {
 			status["deployments"] = syncDeploymentHeartbeat(cfg, r)
+			localPath := strings.TrimSpace(r.URL.Query().Get("local_path"))
+			if localPath != "" && filepath.IsAbs(localPath) {
+				registered, err := deploymentProjectPathExists(cfg.SoulPBURL, cfg.DeploymentID, localPath)
+				if err == nil {
+					status["project_registered"] = registered
+				}
+			}
 		}
 		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+func soulProjectHandler(cfg config) http.HandlerFunc {
+	type requestBody struct {
+		Name      string `json:"name"`
+		LocalPath string `json:"local_path"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.SoulDBEnabled {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sync_disabled", "detail": "Synchronization database features are disabled."})
+			return
+		}
+		connected, detail := checkPocketBaseHealth(cfg.SoulPBURL)
+		if !connected {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pocketbase_unavailable", "detail": detail})
+			return
+		}
+		schemaReady, _, _ := checkSoulSchema(cfg.SoulPBURL)
+		if !schemaReady {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "schema_not_ready", "detail": "Synchronization schema is not initialized."})
+			return
+		}
+		var request requestBody
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+			return
+		}
+		localPath := strings.TrimSpace(request.LocalPath)
+		if localPath == "" || !filepath.IsAbs(localPath) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "local_path_required", "detail": "Choose an absolute local workspace path."})
+			return
+		}
+		name := strings.TrimSpace(request.Name)
+		if name == "" {
+			name = filepath.Base(localPath)
+		}
+		if name == "." || name == string(filepath.Separator) || name == "" {
+			name = "OpenCode Project"
+		}
+
+		spaceID, createdSpace, err := ensureDefaultNamedSpace(cfg.SoulPBURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "named_space_failed", "detail": err.Error()})
+			return
+		}
+		projectID, createdProject, err := ensureSyncedProject(cfg.SoulPBURL, name, spaceID, localPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_failed", "detail": err.Error()})
+			return
+		}
+		createdPath, err := ensureDeploymentProjectPath(cfg.SoulPBURL, cfg.DeploymentID, projectID, localPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_path_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                   true,
+			"project_id":           projectID,
+			"space_id":             spaceID,
+			"deployment_id":        cfg.DeploymentID,
+			"local_path":           localPath,
+			"created_space":        createdSpace,
+			"created_project":      createdProject,
+			"created_project_path": createdPath,
+		})
 	}
 }
 
@@ -718,6 +816,84 @@ type pocketBaseDeploymentRecord struct {
 	Metadata     map[string]any `json:"metadata"`
 	Created      string         `json:"created"`
 	Updated      string         `json:"updated"`
+}
+
+type pocketBaseIDRecord struct {
+	ID string `json:"id"`
+}
+
+func ensureDefaultNamedSpace(baseURL string) (string, bool, error) {
+	if id, err := firstPocketBaseRecordID(baseURL, "opcp_named_spaces", url.Values{"perPage": {"1"}}); err != nil || id != "" {
+		return id, false, err
+	}
+	record, err := createPocketBaseRecordReturning(baseURL, "opcp_named_spaces", map[string]any{
+		"name":          "default",
+		"description":   "Default OpenCode Plus synchronization space.",
+		"expected_kind": "workspace",
+		"sync_mode":     "external",
+		"enabled":       true,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return record.ID, true, nil
+}
+
+func ensureSyncedProject(baseURL, name, spaceID, localPath string) (string, bool, error) {
+	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("name = %q", strings.ReplaceAll(name, `"`, `\"`))}}
+	if id, err := firstPocketBaseRecordID(baseURL, "opcp_synced_projects", query); err != nil || id != "" {
+		return id, false, err
+	}
+	record, err := createPocketBaseRecordReturning(baseURL, "opcp_synced_projects", map[string]any{
+		"name":        name,
+		"description": "Created from OpenCode Plus synchronization setup.",
+		"space_id":    spaceID,
+		"enabled":     true,
+		"metadata": map[string]any{
+			"created_by": "opencode-plus",
+			"local_path": localPath,
+		},
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return record.ID, true, nil
+}
+
+func ensureDeploymentProjectPath(baseURL, deploymentID, projectID, localPath string) (bool, error) {
+	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("deployment_id = %q && project_id = %q", strings.ReplaceAll(deploymentID, `"`, `\"`), strings.ReplaceAll(projectID, `"`, `\"`))}}
+	if id, err := firstPocketBaseRecordID(baseURL, "opcp_deployment_project_paths", query); err != nil || id != "" {
+		if err != nil {
+			return false, err
+		}
+		return false, patchPocketBaseRecord(baseURL, "opcp_deployment_project_paths", id, map[string]any{"local_path": localPath, "enabled": true})
+	}
+	_, err := createPocketBaseRecordReturning(baseURL, "opcp_deployment_project_paths", map[string]any{
+		"deployment_id": deploymentID,
+		"project_id":    projectID,
+		"local_path":    localPath,
+		"enabled":       true,
+	})
+	return true, err
+}
+
+func deploymentProjectPathExists(baseURL, deploymentID, localPath string) (bool, error) {
+	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("deployment_id = %q && local_path = %q && enabled = true", strings.ReplaceAll(deploymentID, `"`, `\"`), strings.ReplaceAll(localPath, `"`, `\"`))}}
+	id, err := firstPocketBaseRecordID(baseURL, "opcp_deployment_project_paths", query)
+	return id != "", err
+}
+
+func firstPocketBaseRecordID(baseURL, collection string, query url.Values) (string, error) {
+	var parsed struct {
+		Items []pocketBaseIDRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, collection, query, &parsed); err != nil {
+		return "", err
+	}
+	if len(parsed.Items) == 0 {
+		return "", nil
+	}
+	return parsed.Items[0].ID, nil
 }
 
 func syncDeploymentHeartbeat(cfg config, r *http.Request) map[string]any {
@@ -815,35 +991,52 @@ func getPocketBaseJSON(baseURL, collection string, query url.Values, target any)
 }
 
 func createPocketBaseRecord(baseURL, collection string, payload map[string]any) error {
-	return writePocketBaseRecord(http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records", payload)
+	_, err := writePocketBaseRecord(http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records", payload)
+	return err
+}
+
+func createPocketBaseRecordReturning(baseURL, collection string, payload map[string]any) (pocketBaseIDRecord, error) {
+	body, err := writePocketBaseRecord(http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records", payload)
+	if err != nil {
+		return pocketBaseIDRecord{}, err
+	}
+	var record pocketBaseIDRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return pocketBaseIDRecord{}, err
+	}
+	if record.ID == "" {
+		return pocketBaseIDRecord{}, errors.New("PocketBase create returned no record id")
+	}
+	return record, nil
 }
 
 func patchPocketBaseRecord(baseURL, collection, id string, payload map[string]any) error {
-	return writePocketBaseRecord(http.MethodPatch, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records/"+url.PathEscape(id), payload)
+	_, err := writePocketBaseRecord(http.MethodPatch, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records/"+url.PathEscape(id), payload)
+	return err
 }
 
-func writePocketBaseRecord(method, endpoint string, payload map[string]any) error {
+func writePocketBaseRecord(method, endpoint string, payload map[string]any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	resBody, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("PocketBase write failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(resBody)))
+		return nil, fmt.Errorf("PocketBase write failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(resBody)))
 	}
-	return nil
+	return resBody, nil
 }
 
 func requestBaseURL(r *http.Request) string {
@@ -1522,9 +1715,12 @@ func writeProviderSecrets(cfg config, secrets providerSecrets) error {
 
 func configHandler(cfg config) http.HandlerFunc {
 	type configUpdate struct {
-		GeminiAuthSource    string `json:"gemini_auth_source"`
-		OpenAIAuthSource    string `json:"openai_auth_source"`
-		AnthropicAuthSource string `json:"anthropic_auth_source"`
+		GeminiAuthSource    string  `json:"gemini_auth_source"`
+		OpenAIAuthSource    string  `json:"openai_auth_source"`
+		AnthropicAuthSource string  `json:"anthropic_auth_source"`
+		InstanceName        *string `json:"instance_name"`
+		SoulDBEnabled       *bool   `json:"soul_db_enabled"`
+		SoulPBURL           *string `json:"soul_pb_url"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -1561,6 +1757,26 @@ func configHandler(cfg config) http.HandlerFunc {
 					return
 				}
 				current.AnthropicAuthSource = source
+			}
+			if update.InstanceName != nil {
+				name := normalizeInstanceName(*update.InstanceName)
+				if name == "" {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_instance_name"})
+					return
+				}
+				current.InstanceName = name
+			}
+			if update.SoulDBEnabled != nil {
+				enabled := *update.SoulDBEnabled
+				current.SoulDBEnabled = &enabled
+			}
+			if update.SoulPBURL != nil {
+				pbURL := normalizePocketBaseURL(*update.SoulPBURL)
+				if pbURL == "" {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_soul_pb_url"})
+					return
+				}
+				current.SoulPBURL = pbURL
 			}
 			if err := writePlusConfig(cfg, current); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config_write_failed", "detail": err.Error()})
@@ -1672,6 +1888,28 @@ func restartOpenCodeHandler() http.HandlerFunc {
 		}()
 
 		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "restart_queued", "service": "opencode-server"})
+	}
+}
+
+func restartGatewayHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", "-lc", "sleep 1; supervisorctl restart opencode-cf-auth-proxy")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("opencode-cf-auth-proxy restart failed: %v: %s", err, strings.TrimSpace(string(output)))
+			} else {
+				log.Printf("opencode-cf-auth-proxy restart requested: %s", strings.TrimSpace(string(output)))
+			}
+		}()
+
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "restart_queued", "service": "opencode-cf-auth-proxy"})
 	}
 }
 
@@ -2124,6 +2362,8 @@ func readPlusConfig(cfg config) plusConfig {
 	loaded.GeminiAuthSource = normalizedOrDefault(normalizeGeminiAuthSource(loaded.GeminiAuthSource), "auto")
 	loaded.OpenAIAuthSource = normalizedOrDefault(normalizeOpenAIAuthSource(loaded.OpenAIAuthSource), "auto")
 	loaded.AnthropicAuthSource = normalizedOrDefault(normalizeAnthropicAuthSource(loaded.AnthropicAuthSource), "auto")
+	loaded.InstanceName = normalizeInstanceName(loaded.InstanceName)
+	loaded.SoulPBURL = normalizePocketBaseURL(loaded.SoulPBURL)
 	return loaded
 }
 
@@ -2131,6 +2371,8 @@ func writePlusConfig(cfg config, next plusConfig) error {
 	next.GeminiAuthSource = normalizedOrDefault(normalizeGeminiAuthSource(next.GeminiAuthSource), "auto")
 	next.OpenAIAuthSource = normalizedOrDefault(normalizeOpenAIAuthSource(next.OpenAIAuthSource), "auto")
 	next.AnthropicAuthSource = normalizedOrDefault(normalizeAnthropicAuthSource(next.AnthropicAuthSource), "auto")
+	next.InstanceName = normalizeInstanceName(next.InstanceName)
+	next.SoulPBURL = normalizePocketBaseURL(next.SoulPBURL)
 	if err := os.MkdirAll(filepath.Dir(cfg.ConfigFile), 0o700); err != nil {
 		return err
 	}
@@ -2139,6 +2381,38 @@ func writePlusConfig(cfg config, next plusConfig) error {
 		return err
 	}
 	return os.WriteFile(cfg.ConfigFile, append(body, '\n'), 0o600)
+}
+
+func normalizePocketBaseURL(value string) string {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	return value
+}
+
+func normalizeInstanceName(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 80 {
+		value = value[:80]
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		if r < 32 || r == 127 || strings.ContainsRune(`/\\"'`, r) {
+			return ""
+		}
+	}
+	return value
 }
 
 func normalizedOrDefault(value, fallback string) string {

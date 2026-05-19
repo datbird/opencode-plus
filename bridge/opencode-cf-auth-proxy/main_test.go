@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -279,6 +280,42 @@ func TestMountManagerCreateRedactsSecretsAndPersists(t *testing.T) {
 	}
 }
 
+func TestMountManagerUpdateProviderPreservesBlankSecrets(t *testing.T) {
+	dir := t.TempDir()
+	manager := newMountManager(config{MountsDir: dir})
+	created, err := manager.createProvider(providerCreateRequest{
+		Name:   "Server",
+		Type:   "ssh",
+		Remote: map[string]string{"host": "old.example", "port": "22"},
+		Secret: mountSecret{Username: "robert", Password: "old-password", PrivateKey: "old-key"},
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	id, _ := created["id"].(string)
+	updated, err := manager.updateProvider(id, providerCreateRequest{
+		Name:   "Server Renamed",
+		Type:   "ssh",
+		Remote: map[string]string{"host": "new.example", "port": "2200"},
+	})
+	if err != nil {
+		t.Fatalf("update provider: %v", err)
+	}
+	if updated["name"] != "Server Renamed" {
+		t.Fatalf("provider name = %v", updated["name"])
+	}
+	manager.mu.Lock()
+	secret := manager.secrets[id]
+	provider := manager.providers[id]
+	manager.mu.Unlock()
+	if secret.Password != "old-password" || secret.PrivateKey != "old-key" || secret.Username != "robert" {
+		t.Fatalf("secret was not preserved: %#v", secret)
+	}
+	if provider.Remote["host"] != "new.example" || provider.Remote["port"] != "2200" {
+		t.Fatalf("provider remote not updated: %#v", provider.Remote)
+	}
+}
+
 func TestRetryAfterBacksOffAndCaps(t *testing.T) {
 	first := retryAfter(1)
 	second := retryAfter(2)
@@ -288,6 +325,52 @@ func TestRetryAfterBacksOffAndCaps(t *testing.T) {
 	}
 	if timeUntil := time.Until(late); timeUntil > 31*time.Minute {
 		t.Fatalf("retry cap exceeded: %s", timeUntil)
+	}
+}
+
+func TestConfigHandlerSavesInstanceName(t *testing.T) {
+	cfg := config{ConfigFile: filepath.Join(t.TempDir(), "opencode-plus-config.json")}
+	body := bytes.NewBufferString(`{"instance_name":"  opencode2  "}`)
+	req := httptest.NewRequest(http.MethodPost, "https://opencode-test.example/__opencode-plus/config", body)
+	res := httptest.NewRecorder()
+
+	configHandler(cfg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	loaded := readPlusConfig(cfg)
+	if loaded.InstanceName != "opencode2" {
+		t.Fatalf("InstanceName = %q, want opencode2", loaded.InstanceName)
+	}
+}
+
+func TestNormalizeInstanceNameRejectsUnsafeValues(t *testing.T) {
+	if got := normalizeInstanceName("  Robert   Laptop  "); got != "Robert Laptop" {
+		t.Fatalf("normalizeInstanceName spaces = %q", got)
+	}
+	if got := normalizeInstanceName("bad/name"); got != "" {
+		t.Fatalf("normalizeInstanceName unsafe = %q, want empty", got)
+	}
+}
+
+func TestConfigHandlerSavesSynchronizationDatabaseSettings(t *testing.T) {
+	cfg := config{ConfigFile: filepath.Join(t.TempDir(), "opencode-plus-config.json")}
+	body := bytes.NewBufferString(`{"soul_db_enabled":false,"soul_pb_url":"http://pocketbase:8080/"}`)
+	req := httptest.NewRequest(http.MethodPost, "https://opencode-test.example/__opencode-plus/config", body)
+	res := httptest.NewRecorder()
+
+	configHandler(cfg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	loaded := readPlusConfig(cfg)
+	if loaded.SoulDBEnabled == nil || *loaded.SoulDBEnabled {
+		t.Fatalf("SoulDBEnabled = %#v, want false", loaded.SoulDBEnabled)
+	}
+	if loaded.SoulPBURL != "http://pocketbase:8080" {
+		t.Fatalf("SoulPBURL = %q", loaded.SoulPBURL)
 	}
 }
 
