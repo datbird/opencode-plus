@@ -47,7 +47,7 @@
   const CONFIG_AREAS = [
     { id: "system", label: "OpenCode Plus Settings", description: "Gateway, statusline modules, vault encryption, and runtime preferences." },
     { id: "hidden", label: "OpenCode Hidden Settings", description: "Access persisted OpenCode settings that normally only live in config." },
-    { id: "soul", label: "Synchronization", description: "Set up synced projects, storage providers, and workspace folder mappings." },
+    { id: "soul", label: "Synchronization", description: "Share project folders across OpenCode instances; session sync will use the same foundation." },
   ];
 
   function readSettings() {
@@ -359,7 +359,9 @@
       const binary = atob(padded);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       const decoded = new TextDecoder().decode(bytes);
-      return decoded.startsWith("/") ? decoded : "/root/aiplayground";
+      if (decoded.startsWith("/")) return decoded;
+      if (decoded.startsWith("root/")) return `/${decoded}`;
+      return "/root/aiplayground";
     } catch {
       return "/root/aiplayground";
     }
@@ -449,6 +451,320 @@
     window.setInterval(() => runThinkingWatchdog(false), STALE_THINKING_CHECK_MS);
   }
 
+  function looksLikeOpenProjectDialog(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const input = element.querySelector("input");
+    const inputText = `${input?.getAttribute("placeholder") || ""} ${input?.getAttribute("aria-label") || ""}`;
+    const hasSearch = /Search folders/i.test(inputText) || /Search folders/i.test(element.textContent || "");
+    const hasTitle = Array.from(element.querySelectorAll("h1,h2,h3,div,span")).some((node) => (node.textContent || "").trim() === "Open project");
+    return hasTitle && hasSearch;
+  }
+
+  function openProjectDialogPanel() {
+    const candidates = Array.from(document.querySelectorAll("div,section,dialog"))
+      .filter((element) => looksLikeOpenProjectDialog(element))
+      .filter((element) => element.querySelector("input"));
+    candidates.sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
+    return candidates[0] || null;
+  }
+
+  async function injectSyncedProjectsIntoOpenDialog(dialog) {
+    if (!(dialog instanceof HTMLElement)) return;
+    const allSections = Array.from(document.querySelectorAll(".ocp-open-project-sync"));
+    const section = allSections[0] || document.createElement("div");
+    allSections.slice(1).forEach((item) => item.remove());
+    if (!section.classList.contains("ocp-open-project-sync")) {
+      section.className = "ocp-open-project-sync";
+    }
+    if (!section.querySelector(".ocp-open-project-sync__list")) {
+      section.innerHTML = `
+        <div class="ocp-open-project-sync__heading"><div class="ocp-open-project-sync__title">Synced projects</div><button type="button" class="ocp-open-project-sync__add">+ Synced project</button></div>
+        <div class="ocp-open-project-sync__list">Loading synced projects...</div>
+      `;
+    }
+    if (dialog.querySelector("input")) {
+      openProjectSearchRow(dialog, dialog.querySelector("input")).insertAdjacentElement("afterend", section);
+    } else {
+      dialog.append(section);
+    }
+    if (section.dataset.loadedFor === location.pathname) return;
+    section.dataset.loadedFor = location.pathname;
+    const list = section.querySelector(".ocp-open-project-sync__list");
+    try {
+      const response = await fetchSyncedProjects();
+      const projects = Array.isArray(response?.projects) ? response.projects : [];
+      if (!projects.length) {
+        list.textContent = "No synced projects configured here yet.";
+        return;
+      }
+      list.innerHTML = projects.map((project) => `
+        <button type="button" class="ocp-open-project-sync__row" data-open-url="${escapeHtml(project.open_url || "")}">
+          <span class="ocp-open-project-sync__icon">▣</span>
+          <span><strong>${escapeHtml(project.name || project.local_path || "Synced project")}</strong><small>${escapeHtml(project.local_path || "")}</small></span>
+        </button>
+      `).join("");
+    } catch (error) {
+      list.textContent = `Synced projects unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  function openProjectSearchRow(dialog, input) {
+    let row = input;
+    while (row.parentElement && row.parentElement !== dialog) {
+      row = row.parentElement;
+    }
+    return row;
+  }
+
+  function openProjectSectionHeading(dialog, label) {
+    return Array.from(dialog.querySelectorAll("h1,h2,h3,h4,div,span,p")).find((element) => (element.textContent || "").trim() === label) || null;
+  }
+
+  function installOpenProjectDialogEnhancer() {
+    if (window.__opencodePlusOpenProjectEnhancerInstalled) return;
+    window.__opencodePlusOpenProjectEnhancerInstalled = true;
+    let scanTimer = 0;
+    const scheduleScan = () => {
+      window.clearTimeout(scanTimer);
+      scanTimer = window.setTimeout(() => {
+        const panel = openProjectDialogPanel();
+        if (panel) injectSyncedProjectsIntoOpenDialog(panel);
+      }, 120);
+    };
+    document.addEventListener("click", (event) => {
+      const row = event.target.closest?.(".ocp-open-project-sync__row");
+      if (!row) {
+        if (event.target.closest?.(".ocp-open-project-sync__add")) openProjectSyncConfigFromChrome();
+        else scheduleScan();
+        return;
+      }
+      const url = row.dataset.openUrl || "";
+      if (url) window.location.href = url;
+    });
+    scheduleScan();
+  }
+
+  function openProjectSyncConfigFromChrome() {
+    const root = document.getElementById("opencode-plus-drawer");
+    const settings = readSettings();
+    const area = CONFIG_AREAS.find((item) => item.id === "soul");
+    if (!root || !area) return;
+    setOpen(root, settings, true);
+    openConfigArea(root, area, settings);
+    window.setTimeout(() => root.querySelector(".ocp-drawer__sync-project-new")?.click(), 100);
+  }
+
+  async function decorateSyncedProjectChrome() {
+    let project = null;
+    try {
+      project = await currentSyncedProject();
+    } catch {
+      return;
+    }
+    const badgeKey = project?.local_path || "";
+    if (document.documentElement.dataset.ocpSyncedProjectBadge === badgeKey && document.querySelector(".ocp-synced-project-badge, .ocp-synced-project-rail-badge")) return;
+    document.documentElement.dataset.ocpSyncedProjectBadge = badgeKey;
+    document.querySelectorAll(".ocp-synced-project-badge, .ocp-synced-project-rail-badge").forEach((badge) => badge.remove());
+    if (!project) return;
+    const titleText = project.name || "Synced project";
+    const titleNode = Array.from(document.querySelectorAll("h1,h2,h3,div,span")).find((element) => {
+      const text = (element.textContent || "").trim();
+      return text === titleText || text.includes(project.local_path || "__never__");
+    });
+    if (titleNode instanceof HTMLElement) {
+      const badge = document.createElement("span");
+      badge.className = "ocp-synced-project-badge";
+      badge.textContent = "↻ Synced";
+      badge.title = `Synced project: ${project.local_path}`;
+      titleNode.append(badge);
+    }
+    const railButton = document.querySelector("aside button, nav button, [role='navigation'] button");
+    if (railButton instanceof HTMLElement) {
+      railButton.classList.add("ocp-synced-project-rail-anchor");
+      const badge = document.createElement("span");
+      badge.className = "ocp-synced-project-rail-badge";
+      badge.textContent = "↻";
+      badge.title = `Synced project: ${project.local_path}`;
+      railButton.append(badge);
+    }
+  }
+
+  function syncedProjectSessionURL(project, session) {
+    const base = (project?.open_url || `/${base64UrlEncode(project?.local_path || currentOpenCodeDirectory())}/session`).replace(/\/+$/, "");
+    return session?.id ? `${base}/${encodeURIComponent(session.id)}` : base;
+  }
+
+  function syncedProjectSessionTitle(session) {
+    return session?.title || session?.summary || session?.id || "Untitled session";
+  }
+
+  function syncedProjectSessionTime(session) {
+    const value = session?.time?.updated || session?.time?.created || session?.updated || session?.created || "";
+    if (typeof value === "number") {
+      const timestamp = value > 1e12 ? value : value * 1000;
+      return formatRelativeTime(new Date(timestamp).toISOString());
+    }
+    return formatRelativeTime(value);
+  }
+
+  function ensureSyncedProjectSessionPanel() {
+    let panel = document.querySelector(".ocp-synced-project-sessions");
+    if (panel) return panel;
+    panel = document.createElement("aside");
+    panel.className = "ocp-synced-project-sessions";
+    panel.setAttribute("aria-label", "Synced project sessions");
+    panel.innerHTML = `
+      <div class="ocp-synced-project-sessions__header">
+        <span><strong>Synced project</strong><small>Loading sessions...</small></span>
+      </div>
+      <div class="ocp-synced-project-sessions__list">Loading sessions...</div>
+    `;
+    document.documentElement.append(panel);
+    return panel;
+  }
+
+  function visibleElementRect(element) {
+    if (!(element instanceof HTMLElement) || isOwnUiNode(element)) return null;
+    const rect = element.getBoundingClientRect?.();
+    if (!rect || rect.width < 1 || rect.height < 1) return null;
+    if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return null;
+    return rect;
+  }
+
+  function syncedProjectSidebarBounds() {
+    const railRects = Array.from(document.querySelectorAll("button,a,[role='button'],div,span"))
+      .map((element) => ({ element, rect: visibleElementRect(element) }))
+      .filter((item) => item.rect && item.rect.left >= 0 && item.rect.left < 72 && item.rect.top > 36 && item.rect.width >= 20 && item.rect.width <= 48 && item.rect.height >= 20 && item.rect.height <= 48)
+      .filter((item) => (item.element.textContent || "").trim() !== "+");
+    const activeRailBottom = railRects.reduce((bottom, item) => Math.max(bottom, item.rect.bottom), 0);
+
+    const verticalEdges = Array.from(document.querySelectorAll("body *"))
+      .map(visibleElementRect)
+      .filter((rect) => rect && rect.top < 90 && rect.bottom > window.innerHeight * 0.55 && rect.left > 250 && rect.left < 430 && rect.width <= 4)
+      .map((rect) => rect.left)
+      .sort((a, b) => a - b);
+    const rightEdge = verticalEdges[0] || 366;
+    const left = 88;
+    const margin = 12;
+    const top = Math.max(54, activeRailBottom ? activeRailBottom + margin : 54);
+    return { left, top, width: Math.max(220, Math.min(260, rightEdge - left - margin)) };
+  }
+
+  function layoutSyncedProjectSessionPanel(panel) {
+    if (!(panel instanceof HTMLElement) || window.matchMedia?.("(max-width: 720px)").matches) return;
+    const bounds = syncedProjectSidebarBounds();
+    panel.style.left = `${bounds.left}px`;
+    panel.style.top = `${bounds.top}px`;
+    panel.style.width = `${bounds.width}px`;
+  }
+
+  function removeSyncedProjectSessionPanel() {
+    document.querySelector(".ocp-synced-project-sessions")?.remove();
+  }
+
+  async function refreshSyncedProjectSessionPanel(force = false) {
+    let project = null;
+    try {
+      project = await currentSyncedProject();
+    } catch {
+      removeSyncedProjectSessionPanel();
+      return;
+    }
+    if (!project) {
+      removeSyncedProjectSessionPanel();
+      return;
+    }
+    const hiddenKey = `ocp-synced-project-sessions-hidden:${project.local_path}`;
+    if (!force && sessionStorage.getItem(hiddenKey) === "1") {
+      removeSyncedProjectSessionPanel();
+      return;
+    }
+    const panel = ensureSyncedProjectSessionPanel();
+    layoutSyncedProjectSessionPanel(panel);
+    const key = `${project.local_path}|${location.pathname}`;
+    if (!force && panel.dataset.loadedFor === key) return;
+    panel.dataset.loadedFor = key;
+    panel.dataset.localPath = project.local_path || "";
+    const heading = panel.querySelector(".ocp-synced-project-sessions__header span:first-child");
+    const list = panel.querySelector(".ocp-synced-project-sessions__list");
+    if (heading) heading.innerHTML = `<strong>${escapeHtml(project.name || "Synced project")}</strong><small>${escapeHtml(project.local_path || "")}</small>`;
+    if (list) list.textContent = "Loading sessions...";
+    try {
+      const sessions = await fetchSyncedProjectSessions(project.local_path);
+      if (!list) return;
+      if (!sessions.length) {
+        list.innerHTML = `<div class="ocp-synced-project-sessions__empty">No saved sessions for this synced project yet.</div>`;
+        return;
+      }
+      list.innerHTML = sessions.map((session) => {
+        const active = session.id && currentSessionId() === session.id;
+        return `
+          <button type="button" class="ocp-synced-project-sessions__row ${active ? "ocp-synced-project-sessions__row--active" : ""}" data-session-url="${escapeHtml(syncedProjectSessionURL(project, session))}">
+            <strong>${escapeHtml(shorten(syncedProjectSessionTitle(session), 42))}</strong>
+            <small>${escapeHtml(syncedProjectSessionTime(session))}</small>
+          </button>
+        `;
+      }).join("");
+    } catch (error) {
+      if (list) list.innerHTML = `<div class="ocp-synced-project-sessions__empty">Sessions unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
+    }
+  }
+
+  function installSyncedProjectChromeEnhancer() {
+    if (window.__opencodePlusSyncedProjectChromeInstalled) return;
+    window.__opencodePlusSyncedProjectChromeInstalled = true;
+    let timer = 0;
+    const schedule = (force = false, delay = 180) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        refreshSyncedProjectSessionPanel(force).then(() => {
+          const panel = document.querySelector(".ocp-synced-project-sessions");
+          if (panel) layoutSyncedProjectSessionPanel(panel);
+        }).catch(() => {});
+      }, delay);
+    };
+    const wrapHistory = (name) => {
+      const original = history[name];
+      if (typeof original !== "function") return;
+      history[name] = function patchedHistoryMethod(...args) {
+        const result = original.apply(this, args);
+        schedule(false);
+        return result;
+      };
+    };
+    wrapHistory("pushState");
+    wrapHistory("replaceState");
+    document.addEventListener("click", (event) => {
+      const row = event.target.closest?.(".ocp-synced-project-sessions__row");
+      if (row) {
+        const url = row.dataset.sessionUrl || "";
+        if (url) window.location.href = url;
+        return;
+      }
+      const refresh = event.target.closest?.(".ocp-synced-project-sessions__refresh");
+      if (refresh) {
+        const panel = refresh.closest(".ocp-synced-project-sessions");
+        if (panel?.dataset.localPath) sessionStorage.removeItem(`ocp-synced-project-sessions-hidden:${panel.dataset.localPath}`);
+        schedule(true, 0);
+        return;
+      }
+      const close = event.target.closest?.(".ocp-synced-project-sessions__close");
+      if (close) {
+        const panel = close.closest(".ocp-synced-project-sessions");
+        if (panel?.dataset.localPath) sessionStorage.setItem(`ocp-synced-project-sessions-hidden:${panel.dataset.localPath}`, "1");
+        removeSyncedProjectSessionPanel();
+        return;
+      }
+      schedule(false, 300);
+    });
+    window.addEventListener("popstate", () => schedule(false));
+    window.addEventListener("hashchange", () => schedule(false));
+    window.addEventListener("focus", () => schedule(true));
+    window.addEventListener("pageshow", () => schedule(true));
+    window.addEventListener("resize", () => schedule(false, 80));
+    schedule(true, 0);
+  }
+
   function writeSettings(settings) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     window.dispatchEvent(new CustomEvent("opencode-plus:settings", { detail: settings }));
@@ -536,7 +852,7 @@
   }
 
   async function fetchGatewayInfo() {
-    const response = await fetch("/__opencode-plus/health", { cache: "no-store" });
+    const response = await fetch("/__opencode-plus/health?support=1", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
   }
@@ -554,6 +870,82 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function createNewSynchronizedProject(payload) {
+    const response = await fetch("/__opencode-plus/soul/project/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      if (body.error === "project_path_exists") {
+        throw new Error(`A folder already exists at ${body.detail || "that location"}. Use the synced project list below to open it, or choose a different folder name.`);
+      }
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function fetchSyncedProjects() {
+    const response = await fetch("/__opencode-plus/soul/projects", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function currentSyncedProject() {
+    const response = await fetchSyncedProjects();
+    const projects = Array.isArray(response?.projects) ? response.projects : [];
+    const current = currentOpenCodeDirectory();
+    return projects.find((project) => project.local_path === current) || null;
+  }
+
+  async function fetchSyncedProjectSessions(localPath) {
+    const response = await fetch("/session", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const sessions = await response.json();
+    return (Array.isArray(sessions) ? sessions : [])
+      .filter((session) => session.directory === localPath || session.path === localPath.replace(/^\/+/, ""))
+      .filter((session) => !session.time?.archived)
+      .sort((a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0));
+  }
+
+  async function deleteSyncedProjectMapping(id) {
+    const response = await fetch(`/__opencode-plus/soul/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function updateSyncedProjectMapping(id, payload) {
+    const response = await fetch(`/__opencode-plus/soul/projects/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async function fetchNamedWorkspaces() {
+    const response = await fetch("/__opencode-plus/soul/workspaces", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function deleteDeploymentRecord(id) {
+    const response = await fetch(`/__opencode-plus/soul/deployments/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.detail || body.error || `HTTP ${response.status}`);
@@ -1610,38 +2002,76 @@
   function soulSyncMarkup() {
     return `
       <div class="ocp-drawer__modal-intro ocp-drawer__sync-summary">
-        <strong>Synchronization is optional and modular.</strong>
-        <span>Use it to make this workspace portable across OpenCode instances: register the project, share sync metadata through PocketBase, connect storage accounts, and map remote folders into the local workspace.</span>
-        <span>You do not need every piece to get value. You can set up only a synced project, only a storage provider, only a workspace folder mapping, or the full flow.</span>
-        <span>Full setup requires a reachable PocketBase database, ready sync tables, a stable instance name, at least one synced project, and any storage provider/folder mappings you want to use.</span>
+        <strong>Keep the same OpenCode project available everywhere.</strong>
+        <span>Synchronization connects every OpenCode instance to the same project folders. The sync index tracks which instances and projects exist; the shared folder holds the actual files.</span>
+        <span>Session synchronization will build on this same model: PocketBase indexes sessions, while each synced project stores the session payload in its hidden <code>.opencode-plus/</code> folder.</span>
+        <span>Normal setup is: connect the sync index, connect shared storage, map a synced workspace folder, then create synced projects inside it.</span>
       </div>
       <div class="ocp-drawer__system-section ocp-drawer__sync-actions">
-        <h4>Setup Checklist</h4>
+        <h4>Setup Progress</h4>
         <div class="ocp-drawer__sync-checklist">
-          <div class="ocp-drawer__sync-check" data-sync-check="database"><span><strong>Database connected</strong><small>Checking...</small></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Database Settings</button></div>
-          <div class="ocp-drawer__sync-check" data-sync-check="schema"><span><strong>Sync tables ready</strong><small>Checking...</small></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Database Settings</button></div>
-          <div class="ocp-drawer__sync-check" data-sync-check="space"><span><strong>Project space ready</strong><small>Will be created automatically if missing.</small></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Set Up Synced Project</button></div>
-          <div class="ocp-drawer__sync-check" data-sync-check="project"><span><strong>This workspace registered</strong><small>Click setup to create or update it.</small></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Set Up Synced Project</button></div>
-          <div class="ocp-drawer__sync-check" data-sync-check="provider"><span><strong>Storage provider connected</strong><small>Add Google Drive, SSH/SFTP, or SMB if needed.</small></span><button type="button" class="ocp-drawer__button" data-sync-section="storage-providers">Set Up Storage Providers</button></div>
-          <div class="ocp-drawer__sync-check" data-sync-check="mapping"><span><strong>Workspace folder mapped</strong><small>Map provider folders into this workspace if needed.</small></span><button type="button" class="ocp-drawer__button" data-sync-section="workspace-folders">Map Workspace Folders</button></div>
+          <details class="ocp-drawer__sync-check" data-sync-check="database"><summary><span><strong>Sync index connected</strong><small>Checking PocketBase...</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Configure Index</button></summary><p>PocketBase is the lightweight index for instances, projects, and future synced sessions. It does not store project files.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="schema"><summary><span><strong>Sync index ready</strong><small>Checking tables...</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="database-settings">Configure Index</button></summary><p>Creates the small tables OpenCode Plus needs to identify synced workspaces, projects, instances, and later session indexes.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="provider"><summary><span><strong>Shared storage connected</strong><small>Add Google Drive, SSH/SFTP, or SMB.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="storage-providers">Connect Storage</button></summary><p>This is where the actual synced project folders live, so every OpenCode instance can open the same files.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="mapping"><summary><span><strong>Synced workspace folder mapped</strong><small>Choose where synced projects live on this instance.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="workspace-folders">Map Folder</button></summary><p>Maps shared storage into a local folder on this instance. Each server can use a different local path for the same synced workspace.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="space"><summary><span><strong>Synced workspace registered</strong><small>Will be created automatically if missing.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Register Current Project</button></summary><p>Names the shared workspace so all instances agree which local folder represents the same synced area.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="project"><summary><span><strong>Current project registered</strong><small>Click register to create or update it.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Register Current Project</button></summary><p>Links the currently open project path to the synced workspace. This makes the project discoverable on other instances.</p></details>
         </div>
         <div class="ocp-drawer__button-row"><button type="button" class="ocp-drawer__button" data-sync-action="refresh">Refresh synchronization status</button></div>
         <p class="ocp-drawer__field-detail ocp-drawer__sync-action-detail">Ready to check this workspace.</p>
       </div>
       <div class="ocp-drawer__system-section">
-        <h4>Sync Infrastructure</h4>
+        <h4>Synced Projects</h4>
+        <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--projects ocp-drawer__profile-shell--list-only">
+          <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--projects">
+            <div class="ocp-drawer__profile-panel-header">
+              <span><strong>Create a synced project</strong><small>Make a new project folder inside a synced workspace. Session-sync scaffolding is created at the same time.</small></span>
+              <button type="button" class="ocp-drawer__button ocp-drawer__sync-project-new">New Synced Project</button>
+            </div>
+            <p class="ocp-drawer__field-detail">Existing OpenCode projects stay in the native OpenCode UI. This flow is only for new projects that should be shared across instances.</p>
+          </div>
+          <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--projects" hidden>
+            <div class="ocp-drawer__profile-editor-heading">
+              <span><strong class="ocp-drawer__sync-project-editor-title">New synced project</strong><small>Create a folder inside a synced workspace and register it for this instance.</small></span>
+            </div>
+            <input class="ocp-drawer__sync-project-edit-id" type="hidden" value="">
+            <label>
+              <span>Project name</span>
+              <input class="ocp-drawer__field ocp-drawer__new-sync-project-name" type="text" placeholder="e.g. My New Project" autocomplete="off">
+            </label>
+            <label class="ocp-drawer__sync-project-create-only">
+              <span>Folder name</span>
+              <input class="ocp-drawer__field ocp-drawer__new-sync-project-folder" type="text" placeholder="e.g. my-new-project" autocomplete="off">
+            </label>
+            <label class="ocp-drawer__sync-project-create-only">
+              <span>Synced workspace folder</span>
+              <select class="ocp-drawer__field ocp-drawer__new-sync-project-workspace" disabled>
+                <option value="">Checking mapped workspaces...</option>
+              </select>
+            </label>
+            <div class="ocp-drawer__button-row">
+              <button type="button" class="ocp-drawer__button ocp-drawer__new-sync-project-create">Save Synced Project</button>
+              <button type="button" class="ocp-drawer__button ocp-drawer__sync-project-cancel-edit">Cancel</button>
+              <button type="button" class="ocp-drawer__button ocp-drawer__new-sync-project-open" hidden>Open New Project</button>
+            </div>
+            <p class="ocp-drawer__field-detail ocp-drawer__new-sync-project-detail">Available after a synced workspace folder is mapped on this instance.</p>
+          </div>
+        </div>
+      </div>
+      <div class="ocp-drawer__system-section">
+        <h4>Instances</h4>
         <p class="ocp-drawer__field-detail ocp-drawer__soul-db-status">Checking PocketBase...</p>
         <p class="ocp-drawer__field-detail ocp-drawer__soul-schema-status">Checking schema...</p>
         <p class="ocp-drawer__field-detail ocp-drawer__soul-deployment-status">Checking deployment identity...</p>
         <div class="ocp-drawer__instance-list">Loading known instances...</div>
       </div>
       <div class="ocp-drawer__system-section">
-        <h4>Database Settings</h4>
+        <h4>Sync Index</h4>
         <label class="ocp-drawer__hidden-toggle">
           <input class="ocp-drawer__sync-db-enabled" type="checkbox">
           <span>
-            <strong>Enable synchronization database</strong>
-            <small>Use PocketBase for project registration, named spaces, souls, and shared assets.</small>
+            <strong>Use PocketBase sync index</strong>
+            <small>Indexes instances, synced workspaces, synced projects, and future synced sessions. Project files stay in shared storage.</small>
           </span>
         </label>
         <label>
@@ -1655,11 +2085,11 @@
         <p class="ocp-drawer__field-detail ocp-drawer__sync-db-detail">Checking database settings...</p>
       </div>
       <div class="ocp-drawer__system-section ocp-drawer__sync-storage-providers" data-sync-panel="storage-providers">
-        <h4>Storage Providers</h4>
+        <h4>Shared Storage Accounts</h4>
         ${mountManagerMarkup("providers")}
       </div>
       <div class="ocp-drawer__system-section ocp-drawer__sync-workspace-folders" data-sync-panel="workspace-folders">
-        <h4>Workspace Folder Mapping</h4>
+        <h4>Synced Workspace Folders</h4>
         ${mountManagerMarkup("links")}
       </div>
     `;
@@ -1667,13 +2097,14 @@
 
   function synchronizationFeatureLabel(key) {
     const labels = {
-      souls: "Souls",
+      souls: "Shared session data",
       skills: "Skills",
       commands: "Commands",
       tools: "Tools",
       plugins_hooks: "Plugins and hooks",
       named_spaces: "Named spaces",
       synced_projects: "Project synchronization",
+      synced_sessions: "Session synchronization",
     };
     return labels[key] || key.replace(/_/g, " ");
   }
@@ -1703,21 +2134,21 @@
     const dbDetail = container.querySelector(".ocp-drawer__sync-db-detail");
 
     setSyncCheck(container, "database", Boolean(status?.enabled && db.connected), db.connected ? "PocketBase is reachable." : "PocketBase is not reachable yet.");
-    setSyncCheck(container, "schema", Boolean(status?.schema_ready), status?.schema_ready ? "Required sync tables exist." : "Sync tables are not initialized yet.");
-    setSyncCheck(container, "space", Boolean(status?.named_space_count), status?.named_space_count ? `${status.named_space_count} project space${status.named_space_count === 1 ? "" : "s"} ready.` : "No project space yet. Setup will create one.");
-    setSyncCheck(container, "project", Boolean(status?.project_registered), status?.project_registered ? `Registered ${currentOpenCodeDirectory()}.` : `Current workspace: ${currentOpenCodeDirectory()}`);
+    setSyncCheck(container, "schema", Boolean(status?.schema_ready), status?.schema_ready ? "Required sync-index tables exist." : "Sync-index tables are not initialized yet.");
+    setSyncCheck(container, "space", Boolean(status?.named_space_count), status?.named_space_count ? `${status.named_space_count} synced workspace${status.named_space_count === 1 ? "" : "s"} ready.` : "No synced workspace record yet. Register will create one.");
+    setSyncCheck(container, "project", Boolean(status?.project_registered), status?.project_registered ? `Registered ${currentOpenCodeDirectory()}.` : `Current project path: ${currentOpenCodeDirectory()}`);
 
     if (dbStatus) {
       dbStatus.textContent = status?.enabled
-        ? `PocketBase ${db.connected ? "connected" : "unavailable"}: ${db.url || "not configured"}. ${db.connected ? "Synchronization prerequisites can be checked." : "Synchronization features remain disabled until the database is reachable."}`
-        : "Synchronization database features are disabled; OpenCode continues normally.";
+        ? `PocketBase ${db.connected ? "connected" : "unavailable"}: ${db.url || "not configured"}. ${db.connected ? "The sync index can track instances and projects." : "Synced-project setup waits until the index is reachable."}`
+        : "The PocketBase sync index is disabled; OpenCode continues normally.";
     }
     if (dbEnabled) dbEnabled.checked = Boolean(status?.enabled);
     if (dbURL) dbURL.value = db.url || "";
     if (dbDetail) {
       dbDetail.textContent = status?.enabled
         ? `Using ${db.url || "no PocketBase URL configured"}. Save changes, then restart OpenCode Plus to apply them.`
-        : "Database synchronization is disabled. Save changes, then restart OpenCode Plus to apply them.";
+        : "The sync index is disabled. Save changes, then restart OpenCode Plus to apply them.";
     }
     if (deploymentStatus) {
       const stableText = deployment.stable_identity === false ? "unstable Docker hostname fallback" : "stable identity";
@@ -1737,13 +2168,17 @@
           const stable = meta.stable_identity !== false;
           const commit = meta.git_commit || "unknown build";
           const seen = formatRelativeTime(deploymentLastSeen(item));
+          const deleteButton = isCurrent ? "" : `<button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__instance-delete" data-deployment-record-id="${escapeHtml(item.id || "")}" aria-label="Delete stale instance ${escapeHtml(item.name || item.deployment_id || "unknown")}" title="Delete stale instance">×</button>`;
           return `
             <div class="ocp-drawer__instance-row ${isCurrent ? "ocp-drawer__instance-row--current" : ""}">
               <span>
                 <strong>${escapeHtml(item.name || item.deployment_id || "unknown")}${isCurrent ? " · this instance" : ""}</strong>
                 <small>${escapeHtml(item.url || meta.url || "no URL recorded")} · ${escapeHtml(commit)} · seen ${escapeHtml(seen)}</small>
               </span>
-              <em class="${stable ? "" : "ocp-drawer__sync-warn"}">${stable ? "stable" : "fix identity"}</em>
+              <span class="ocp-drawer__instance-actions">
+                <em class="${stable ? "" : "ocp-drawer__sync-warn"}">${stable ? "stable" : "fix identity"}</em>
+                ${deleteButton}
+              </span>
             </div>
           `;
         }).join("");
@@ -1755,9 +2190,9 @@
       } else if (!db.connected) {
         schemaStatus.textContent = "Schema checks skipped until PocketBase is reachable.";
       } else if (status.schema_ready) {
-        schemaStatus.textContent = `Schema initialized. Named spaces configured: ${status.named_space_count || 0}.`;
+        schemaStatus.textContent = `Sync index initialized. Synced workspaces configured: ${status.named_space_count || 0}.`;
       } else {
-        schemaStatus.textContent = "Schema not initialized. Synchronization modules remain safely disabled.";
+        schemaStatus.textContent = "Sync index not initialized. Synced-project setup remains safely disabled.";
       }
     }
     if (featureList) {
@@ -1773,40 +2208,108 @@
     }
     if (projectGate) {
       if (!db.connected) {
-        projectGate.textContent = "Create Synchronized Project is safely disabled because it requires PocketBase connection and at least one named space.";
+        projectGate.textContent = "Register project is disabled until PocketBase is reachable.";
       } else if (!status.schema_ready) {
-        projectGate.textContent = "Create Synchronized Project is safely disabled until the synchronization schema is initialized.";
+        projectGate.textContent = "Register project is disabled until the sync-index schema is initialized.";
       } else if (!status.named_space_count) {
-        projectGate.textContent = "Create Synchronized Project is safely disabled until at least one named space exists.";
+        projectGate.textContent = "Register project will create the first synced workspace record.";
       } else {
-        projectGate.textContent = "Synchronized project prerequisites are ready. Creation UI is coming next.";
+        projectGate.textContent = "Synced-project prerequisites are ready.";
       }
     }
     if (createProject) {
       createProject.disabled = !(db.connected && status?.schema_ready);
       createProject.title = createProject.disabled
-        ? "Requires PocketBase connection and initialized synchronization schema."
-        : "Create or update the synced project record for this workspace.";
+        ? "Requires PocketBase connection and initialized sync-index schema."
+        : "Create or update the synced project record for this current project path.";
     }
   }
 
   async function setupSoulSyncControls(container, root, settings) {
+    let fullSyncReady = false;
+    function showProjectSyncEditor(editing = false) {
+      container.querySelector(".ocp-drawer__profile-shell--projects")?.classList.remove("ocp-drawer__profile-shell--list-only");
+      const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--projects");
+      const editorPanel = container.querySelector(".ocp-drawer__profile-editor-panel--projects");
+      if (listPanel) listPanel.hidden = true;
+      if (editorPanel) editorPanel.hidden = false;
+      container.querySelectorAll(".ocp-drawer__sync-project-create-only").forEach((item) => { item.hidden = editing; });
+      const title = container.querySelector(".ocp-drawer__sync-project-editor-title");
+      if (title) title.textContent = editing ? "Edit synced project" : "New synced project";
+      const save = container.querySelector(".ocp-drawer__new-sync-project-create");
+      if (save) save.textContent = editing ? "Save Project" : "Save Synced Project";
+    }
+
+    function hideProjectSyncEditor() {
+      container.querySelector(".ocp-drawer__profile-shell--projects")?.classList.add("ocp-drawer__profile-shell--list-only");
+      const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--projects");
+      const editorPanel = container.querySelector(".ocp-drawer__profile-editor-panel--projects");
+      if (listPanel) listPanel.hidden = false;
+      if (editorPanel) editorPanel.hidden = true;
+    }
+
+    function clearProjectSyncEditor() {
+      const editID = container.querySelector(".ocp-drawer__sync-project-edit-id");
+      if (editID) editID.value = "";
+      const name = container.querySelector(".ocp-drawer__new-sync-project-name");
+      const folder = container.querySelector(".ocp-drawer__new-sync-project-folder");
+      if (name) name.value = "";
+      if (folder) folder.value = "";
+      const open = container.querySelector(".ocp-drawer__new-sync-project-open");
+      if (open) open.hidden = true;
+    }
+
+    async function refreshSyncedProjectList() {
+      const list = container.querySelector(".ocp-drawer__synced-project-list");
+      if (!list) return;
+      try {
+        const response = await fetchSyncedProjects();
+        const projects = Array.isArray(response?.projects) ? response.projects : [];
+        if (!projects.length) {
+          list.innerHTML = `<p class="ocp-drawer__field-detail">No synced projects are registered here yet.</p>`;
+          return;
+        }
+        list.innerHTML = projects.map((project) => `
+          <div class="ocp-drawer__synced-project-row" data-project-mapping-id="${escapeHtml(project.id || "")}" data-project-name="${escapeHtml(project.name || "")}" data-open-url="${escapeHtml(project.open_url || "")}">
+            <span>
+              <strong>${escapeHtml(project.name || project.local_path || "Synced project")}</strong>
+              <small>${escapeHtml(project.local_path || "")}</small>
+            </span>
+            <span class="ocp-drawer__instance-actions">
+              <button type="button" class="ocp-drawer__button ocp-drawer__synced-project-open" data-open-url="${escapeHtml(project.open_url || "")}">Open</button>
+              <button type="button" class="ocp-drawer__icon-action ocp-drawer__synced-project-edit" aria-label="Edit synced project" title="Edit synced project">✎</button>
+              <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__synced-project-delete" aria-label="Remove synced project mapping" title="Remove from this instance">×</button>
+            </span>
+          </div>
+        `).join("");
+      } catch (error) {
+        list.innerHTML = `<p class="ocp-drawer__field-detail">Synced projects unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+      }
+    }
+
     async function refreshStatus() {
       const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
       if (actionDetail) actionDetail.textContent = "Refreshing synchronization status...";
       try {
         const status = await fetchSoulStatus();
         renderSoulStatus(container, status);
+        let providerReady = false;
+        let mappingReady = false;
         try {
           const [providersResponse, mountsResponse] = await Promise.all([fetchStorageProviders(), fetchMounts()]);
           const providers = Array.isArray(providersResponse?.providers) ? providersResponse.providers : [];
           const mounts = Array.isArray(mountsResponse?.mounts) ? mountsResponse.mounts : [];
-          setSyncCheck(container, "provider", providers.length > 0, providers.length ? `${providers.length} storage provider${providers.length === 1 ? "" : "s"} connected.` : "Click to connect Google Drive, SSH/SFTP, or SMB.");
-          setSyncCheck(container, "mapping", mounts.length > 0, mounts.length ? `${mounts.length} workspace folder mapping${mounts.length === 1 ? "" : "s"} configured.` : "Click to map a provider folder into this workspace.");
+          providerReady = providers.length > 0;
+          mappingReady = mounts.length > 0;
+          setSyncCheck(container, "provider", providers.length > 0, providers.length ? `${providers.length} shared storage account${providers.length === 1 ? "" : "s"} connected.` : "Click to connect Google Drive, SSH/SFTP, or SMB.");
+          setSyncCheck(container, "mapping", mounts.length > 0, mounts.length ? `${mounts.length} synced workspace folder${mounts.length === 1 ? "" : "s"} mapped.` : "Click to map a shared folder into this instance.");
         } catch (error) {
           setSyncCheck(container, "provider", false, "Storage provider status unavailable.");
           setSyncCheck(container, "mapping", false, "Workspace folder mapping status unavailable.");
         }
+        fullSyncReady = Boolean(status?.enabled && status?.pocketbase?.connected && status?.schema_ready && providerReady && mappingReady);
+        await refreshNamedWorkspaceOptions(fullSyncReady);
+        await refreshSyncedProjectList();
         if (root) updateInstanceBadge(root, status);
         if (actionDetail) actionDetail.textContent = "Synchronization status refreshed.";
       } catch (error) {
@@ -1817,6 +2320,36 @@
       }
     }
 
+    async function refreshNamedWorkspaceOptions(enabled) {
+      const select = container.querySelector(".ocp-drawer__new-sync-project-workspace");
+      const createButton = container.querySelector(".ocp-drawer__new-sync-project-create");
+      const detail = container.querySelector(".ocp-drawer__new-sync-project-detail");
+      if (!select || !createButton) return;
+      createButton.disabled = true;
+      select.disabled = true;
+      if (!enabled) {
+        select.innerHTML = `<option value="">Map a synced workspace folder first</option>`;
+        if (detail) detail.textContent = "Connect shared storage and map a synced workspace folder before creating a project inside it.";
+        return;
+      }
+      try {
+        const response = await fetchNamedWorkspaces();
+        const workspaces = Array.isArray(response?.workspaces) ? response.workspaces : [];
+        if (!workspaces.length) {
+          select.innerHTML = `<option value="">No synced workspace folders</option>`;
+          if (detail) detail.textContent = "Map a shared storage folder into this instance first.";
+          return;
+        }
+        select.innerHTML = workspaces.map((workspace) => `<option value="${escapeHtml(workspace.id || "")}">${escapeHtml(workspace.name || "Workspace")} · ${escapeHtml(workspace.remote_path || workspace.local_path || "")}</option>`).join("");
+        select.disabled = false;
+        createButton.disabled = false;
+        if (detail) detail.textContent = "New projects are created inside the selected synced workspace folder.";
+      } catch (error) {
+        select.innerHTML = `<option value="">Named workspaces unavailable</option>`;
+        if (detail) detail.textContent = `Named workspace lookup failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+
     container.querySelectorAll("[data-sync-open]").forEach((button) => {
       button.addEventListener("click", () => {
         const area = CONFIG_AREAS.find((item) => item.id === button.dataset.syncOpen);
@@ -1824,7 +2357,9 @@
       });
     });
     container.querySelectorAll("[data-sync-section]").forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
         const panel = container.querySelector(`[data-sync-panel='${button.dataset.syncSection}']`);
         if (panel instanceof HTMLDetailsElement) panel.open = true;
         panel?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1835,7 +2370,116 @@
       const area = CONFIG_AREAS.find((item) => item.id === "system");
       if (root && area) openConfigArea(root, area, settings);
     });
+    container.querySelector(".ocp-drawer__instance-list")?.addEventListener("click", async (event) => {
+      const button = event.target.closest?.(".ocp-drawer__instance-delete");
+      if (!button) return;
+      const id = button.dataset.deploymentRecordId || "";
+      if (!id) return;
+      if (!window.confirm("Delete this stale instance record? This only removes the sync heartbeat row; it does not stop or change that OpenCode instance.")) return;
+      const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
+      button.disabled = true;
+      if (actionDetail) actionDetail.textContent = "Deleting stale instance record...";
+      try {
+        await deleteDeploymentRecord(id);
+        if (actionDetail) actionDetail.textContent = "Stale instance record deleted.";
+        await refreshStatus();
+      } catch (error) {
+        if (actionDetail) actionDetail.textContent = `Delete failed: ${error instanceof Error ? error.message : String(error)}`;
+        button.disabled = false;
+      }
+    });
+    container.querySelector(".ocp-drawer__synced-project-list")?.addEventListener("click", async (event) => {
+      const openButton = event.target.closest?.(".ocp-drawer__synced-project-open");
+      if (openButton) {
+        const url = openButton.dataset.openUrl || "";
+        if (url) window.location.href = url;
+        return;
+      }
+      const editButton = event.target.closest?.(".ocp-drawer__synced-project-edit");
+      if (editButton) {
+        const row = editButton.closest(".ocp-drawer__synced-project-row");
+        const editID = container.querySelector(".ocp-drawer__sync-project-edit-id");
+        const name = container.querySelector(".ocp-drawer__new-sync-project-name");
+        if (editID) editID.value = row?.dataset.projectMappingId || "";
+        if (name) name.value = row?.dataset.projectName || "";
+        showProjectSyncEditor(true);
+        return;
+      }
+      const deleteButton = event.target.closest?.(".ocp-drawer__synced-project-delete");
+      if (!deleteButton) return;
+      const row = deleteButton.closest(".ocp-drawer__synced-project-row");
+      const id = row?.dataset.projectMappingId || "";
+      if (!id) return;
+      if (!window.confirm("Remove this synced project from this OpenCode instance? This does not delete files or remove it from other instances.")) return;
+      deleteButton.disabled = true;
+      try {
+        await deleteSyncedProjectMapping(id);
+        await refreshSyncedProjectList();
+      } catch (error) {
+        window.alert(`Remove failed: ${error instanceof Error ? error.message : String(error)}`);
+        deleteButton.disabled = false;
+      }
+    });
+    container.querySelector(".ocp-drawer__sync-project-new")?.addEventListener("click", () => {
+      clearProjectSyncEditor();
+      showProjectSyncEditor(false);
+    });
+    container.querySelector(".ocp-drawer__sync-project-cancel-edit")?.addEventListener("click", () => {
+      clearProjectSyncEditor();
+      hideProjectSyncEditor();
+    });
+    const newProjectName = container.querySelector(".ocp-drawer__new-sync-project-name");
+    const newProjectFolder = container.querySelector(".ocp-drawer__new-sync-project-folder");
+    const newProjectDetail = container.querySelector(".ocp-drawer__new-sync-project-detail");
+    const newProjectOpen = container.querySelector(".ocp-drawer__new-sync-project-open");
+    newProjectName?.addEventListener("input", () => {
+      if (!newProjectFolder || newProjectFolder.value.trim()) return;
+      newProjectFolder.value = newProjectName.value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    });
+    container.querySelector(".ocp-drawer__new-sync-project-create")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const editID = container.querySelector(".ocp-drawer__sync-project-edit-id")?.value || "";
+      const name = newProjectName?.value.trim() || "";
+      const folderName = newProjectFolder?.value.trim() || "";
+      const workspaceID = container.querySelector(".ocp-drawer__new-sync-project-workspace")?.value || "";
+      if (!name) {
+        if (newProjectDetail) newProjectDetail.textContent = "Enter a project name first.";
+        return;
+      }
+      if (!editID && (!fullSyncReady || !workspaceID)) {
+        if (newProjectDetail) newProjectDetail.textContent = "Choose a synced workspace folder first.";
+        return;
+      }
+      button.disabled = true;
+      if (newProjectOpen) newProjectOpen.hidden = true;
+      if (newProjectDetail) newProjectDetail.textContent = "Creating synced project...";
+      try {
+        if (editID) {
+          await updateSyncedProjectMapping(editID, { name });
+          if (newProjectDetail) newProjectDetail.textContent = "Synced project updated.";
+        } else {
+          const result = await createNewSynchronizedProject({ name, folder_name: folderName, workspace_id: workspaceID });
+          if (newProjectDetail) {
+            const sessionText = result.session_sync?.enabled ? ` Session sync scaffold: ${result.session_sync.payload_dir}.` : "";
+            newProjectDetail.textContent = `Created ${result.local_path}.${sessionText}`;
+          }
+          if (newProjectOpen) {
+            newProjectOpen.hidden = false;
+            newProjectOpen.onclick = () => { window.location.href = result.open_url; };
+          }
+        }
+        await refreshSyncedProjectList();
+        await refreshStatus();
+        if (editID) hideProjectSyncEditor();
+      } catch (error) {
+        if (newProjectDetail) newProjectDetail.textContent = `Create failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
     container.querySelectorAll(".ocp-drawer__soul-create-project").forEach((setupButton) => setupButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const button = event.currentTarget;
       const buttons = Array.from(container.querySelectorAll(".ocp-drawer__soul-create-project"));
       const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
@@ -1845,8 +2489,8 @@
       if (actionDetail) actionDetail.textContent = "Creating or updating synced project records...";
       try {
         const result = await createSynchronizedProject({ name: projectName, local_path: workspace });
-        setSyncCheck(container, "space", true, result.created_space ? "Created default project space." : "Project space already existed.");
-        setSyncCheck(container, "project", true, result.created_project ? "Created synced project for this workspace." : "Updated existing synced project mapping.");
+        setSyncCheck(container, "space", true, result.created_space ? "Created synced workspace record." : "Synced workspace record already existed.");
+        setSyncCheck(container, "project", true, result.created_project ? "Registered current project." : "Updated current project mapping.");
         if (actionDetail) actionDetail.textContent = "Synced project is set up for this workspace.";
         await refreshStatus();
         setSyncCheck(container, "project", true, `Registered ${workspace}.`);
@@ -1937,25 +2581,25 @@
     const showProviders = mode === "all" || mode === "providers";
     const showLinks = mode === "all" || mode === "links";
     return `
-      <p class="ocp-drawer__modal-intro">${showProviders && !showLinks ? "Create reusable storage provider profiles, then edit them whenever credentials or host details change." : "Create workspace storage profiles that map one saved provider into this workspace."}</p>
+      <p class="ocp-drawer__modal-intro">${showProviders && !showLinks ? "Connect the shared storage account that will hold synced OpenCode project folders." : "Choose which shared storage folder appears locally as the synced workspace folder on this instance."}</p>
       ${showProviders ? `
       <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--providers ocp-drawer__profile-shell--list-only">
         <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--providers">
           <div class="ocp-drawer__profile-panel-header">
-            <span><strong>Provider profiles</strong><small>Accounts and servers you can reuse.</small></span>
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-new" aria-label="Add storage provider" title="Add storage provider">+</button>
+            <span><strong>Shared storage accounts</strong><small>Google Drive, SSH/SFTP, or SMB accounts that hold synced projects.</small></span>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-new" aria-label="Add shared storage account" title="Add shared storage account">+</button>
           </div>
           <div class="ocp-drawer__provider-list ocp-drawer__profile-list">Loading providers...</div>
         </div>
         <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--providers" hidden>
           <div class="ocp-drawer__profile-editor-heading">
-            <span><strong class="ocp-drawer__provider-editor-title">New Storage Provider</strong><small>Save credentials once, link folders separately.</small></span>
+            <span><strong class="ocp-drawer__provider-editor-title">New shared storage account</strong><small>Save credentials once, then choose which folder to sync.</small></span>
           </div>
           <div class="ocp-drawer__credential-form ocp-drawer__provider-form">
           <input class="ocp-drawer__provider-edit-id" type="hidden">
-          <label title="A friendly name for this reusable account or server. This name appears in Workspace Folder Mapping.">
-            <span>Provider name</span>
-            <input class="ocp-drawer__field ocp-drawer__provider-name" type="text" placeholder="e.g. 'gdrive' or 'production-server'" title="A friendly name for this reusable account or server. This name appears in Workspace Folder Mapping.">
+          <label title="A friendly name for this shared storage account. This name appears when mapping synced workspace folders.">
+            <span>Storage account name</span>
+            <input class="ocp-drawer__field ocp-drawer__provider-name" type="text" placeholder="e.g. 'gdrive' or 'project-server'" title="A friendly name for this shared storage account. This name appears when mapping synced workspace folders.">
           </label>
           <label title="The kind of storage connection to save. Provider-specific fields appear below.">
             <span>Type</span>
@@ -1965,9 +2609,9 @@
               <option value="smb">SMB</option>
             </select>
           </label>
-          <label data-provider-field="host" title="Server hostname or IP address for this storage provider. Do not include a folder path here.">
+          <label data-provider-field="host" title="Server hostname or IP address for this shared storage account. Do not include a folder path here.">
             <span>Host</span>
-            <input class="ocp-drawer__field ocp-drawer__provider-host" type="text" placeholder="server.local" title="Server hostname or IP address for this storage provider. Do not include a folder path here.">
+            <input class="ocp-drawer__field ocp-drawer__provider-host" type="text" placeholder="server.local" title="Server hostname or IP address for this shared storage account. Do not include a folder path here.">
           </label>
           <p class="ocp-drawer__field-detail ocp-drawer__provider-detail"></p>
           <div class="ocp-drawer__credential-form ocp-drawer__provider-google-connect">
@@ -2024,10 +2668,10 @@
             <textarea class="ocp-drawer__field ocp-drawer__provider-private-key ocp-drawer__masked-secret" autocomplete="off" spellcheck="false" placeholder="Optional SSH private key" title="Optional SSH private key for SSH/SFTP providers. Use this instead of, or in addition to, a password."></textarea>
           </label>
           <div class="ocp-drawer__button-row">
-            <button type="button" class="ocp-drawer__button ocp-drawer__provider-save">Save Provider</button>
+            <button type="button" class="ocp-drawer__button ocp-drawer__provider-save">Save Storage Account</button>
             <button type="button" class="ocp-drawer__button ocp-drawer__provider-cancel-edit ocp-drawer__mount-field--hidden">Cancel Edit</button>
           </div>
-          <p class="ocp-drawer__field-detail ocp-drawer__provider-save-detail">Storage providers save reusable account/server details only.</p>
+          <p class="ocp-drawer__field-detail ocp-drawer__provider-save-detail">Storage accounts save reusable credentials only. Choose the synced folder in the next section.</p>
         </div>
         </div>
       </div>
@@ -2036,20 +2680,20 @@
       <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--links ocp-drawer__profile-shell--list-only">
         <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--links">
           <div class="ocp-drawer__profile-panel-header">
-            <span><strong>Workspace storage profiles</strong><small>Local folders mapped into this workspace.</small></span>
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-new" aria-label="Add workspace folder mapping" title="Add workspace folder mapping">+</button>
+            <span><strong>Synced workspace folders</strong><small>Shared folders mounted into this OpenCode instance.</small></span>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-new" aria-label="Add synced workspace folder" title="Add synced workspace folder">+</button>
           </div>
           <div class="ocp-drawer__mount-list ocp-drawer__profile-list">Loading mounts...</div>
         </div>
         <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--links" hidden>
           <div class="ocp-drawer__profile-editor-heading">
-            <span><strong class="ocp-drawer__mount-editor-title">New Workspace Folder Mapping</strong><small>Pick a provider, then choose the remote and local folders.</small></span>
+            <span><strong class="ocp-drawer__mount-editor-title">New synced workspace folder</strong><small>Pick a shared storage account, then choose the remote folder and local mount path.</small></span>
           </div>
           <div class="ocp-drawer__credential-form ocp-drawer__mount-form">
           <input class="ocp-drawer__mount-edit-id" type="hidden">
-          <label title="Choose one saved Storage Provider. The mapping will use that provider's saved account/server details.">
-            <span>Storage provider</span>
-            <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved Storage Provider. The mapping will use that provider's saved account/server details."></select>
+          <label title="Choose one saved shared storage account. The mapping uses that account's saved credentials.">
+            <span>Shared storage account</span>
+            <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved shared storage account. The mapping uses that account's saved credentials."></select>
           </label>
           <label title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
             <span>Remote folder/path</span>
@@ -2058,7 +2702,7 @@
           <details class="ocp-drawer__browse-panel ocp-drawer__mount-field--hidden" data-mount-field="browse">
             <summary>Browse remote folders</summary>
             <div class="ocp-drawer__browse-header">
-              <span><strong>Google Drive folders</strong><small>Select a Drive folder for this workspace folder mapping.</small></span>
+              <span><strong>Google Drive folders</strong><small>Select the Drive folder that will contain synced projects.</small></span>
               <button type="button" class="ocp-drawer__button ocp-drawer__browse-load">Load folders</button>
             </div>
             <div class="ocp-drawer__browse-path" hidden></div>
@@ -2076,15 +2720,15 @@
             <input class="ocp-drawer__mount-read-only" type="checkbox" checked title="When enabled, agents should treat this mapped storage as read-only where supported.">
             <span><strong>Read-only</strong><small>Recommended until you are ready for agents to write to this remote.</small></span>
           </label>
-          <label class="ocp-drawer__hidden-toggle" title="Automatically retry this workspace folder mapping later if the provider or network is temporarily unavailable.">
-            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this workspace folder mapping later if the provider or network is temporarily unavailable.">
+          <label class="ocp-drawer__hidden-toggle" title="Automatically retry this synced workspace folder later if the provider or network is temporarily unavailable.">
+            <input class="ocp-drawer__mount-auto-reconnect" type="checkbox" checked title="Automatically retry this synced workspace folder later if the provider or network is temporarily unavailable.">
             <span><strong>Auto-reconnect</strong><small>Retry unreachable SSH/SMB mappings later.</small></span>
           </label>
           <div class="ocp-drawer__button-row">
             <button type="button" class="ocp-drawer__button ocp-drawer__mount-save">Save Mapping</button>
             <button type="button" class="ocp-drawer__button ocp-drawer__mount-cancel-edit ocp-drawer__mount-field--hidden">Cancel Edit</button>
           </div>
-          <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">Choose a storage provider first.</p>
+          <p class="ocp-drawer__field-detail ocp-drawer__mount-save-detail">Choose a shared storage account first.</p>
         </div>
         </div>
       </div>
@@ -2096,7 +2740,7 @@
     const list = container.querySelector(".ocp-drawer__mount-list");
     if (!list) return;
     if (!Array.isArray(mounts) || mounts.length === 0) {
-      list.innerHTML = `<p class="ocp-drawer__empty-config">No workspace folder mappings yet. Choose + to create one.</p>`;
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No synced workspace folders yet. Choose + to map one.</p>`;
       return;
     }
     list.innerHTML = mounts.map((mount) => {
@@ -2108,23 +2752,23 @@
       const nextRetry = state.next_retry_at ? `<small>Next retry: ${escapeHtml(state.next_retry_at)}</small>` : "";
       const error = state.last_error ? `<small class="ocp-drawer__link-error">${escapeHtml(shorten(state.last_error, 180))}</small>` : "";
       const connectLabel = "Connect";
-      const disconnectTitle = "Disconnect workspace folder mapping";
+      const disconnectTitle = "Disconnect synced workspace folder";
       const disconnectButton = `<button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="disconnect" aria-label="${disconnectTitle}" title="${disconnectTitle}">⏏</button>`;
       return `
         <div class="ocp-drawer__profile-card ocp-drawer__link-card ocp-drawer__mount-row" data-mount-id="${escapeHtml(mount.id)}">
           <div class="ocp-drawer__link-grid">
-            <span><small>Workspace</small><strong>${escapeHtml(mount.name || mount.id)}</strong></span>
+            <span><small>Synced workspace</small><strong>${escapeHtml(mount.name || mount.id)}</strong></span>
             <span><small>Local folder</small><strong>${escapeHtml(localFolder || "mount")}</strong></span>
             <span><small>Remote folder</small><strong>${escapeHtml(remoteFolder || "(root)")}</strong></span>
             <span><small>Provider</small><strong>${escapeHtml(providerName)}</strong><em>${escapeHtml(mount.type || "mount")} · ${escapeHtml(status)}</em></span>
           </div>
           ${error}${nextRetry}
           <div class="ocp-drawer__profile-card-actions">
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="test" aria-label="Test workspace folder mapping" title="Test workspace folder mapping">✓</button>
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="connect" aria-label="${connectLabel} workspace folder mapping" title="${connectLabel} workspace folder mapping">↻</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="test" aria-label="Test synced workspace folder" title="Test synced workspace folder">✓</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-action" data-action="connect" aria-label="${connectLabel} synced workspace folder" title="${connectLabel} synced workspace folder">↻</button>
             ${disconnectButton}
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-edit" aria-label="Edit workspace folder mapping" title="Edit workspace folder mapping">✎</button>
-            <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__mount-delete" aria-label="Delete workspace folder mapping" title="Delete workspace folder mapping">×</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__mount-edit" aria-label="Edit synced workspace folder" title="Edit synced workspace folder">✎</button>
+            <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__mount-delete" aria-label="Delete synced workspace folder" title="Delete synced workspace folder">×</button>
           </div>
         </div>
       `;
@@ -2142,14 +2786,14 @@
     const select = container.querySelector(".ocp-drawer__mount-provider-select");
     if (select) {
       if (!Array.isArray(providers) || providers.length === 0) {
-        select.innerHTML = `<option value="">No storage providers configured</option>`;
+        select.innerHTML = `<option value="">No shared storage accounts configured</option>`;
       } else {
         select.innerHTML = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" data-provider-type="${escapeHtml(provider.type)}">${escapeHtml(provider.name)} · ${escapeHtml(provider.type)}</option>`).join("");
       }
     }
     if (!list) return;
     if (!Array.isArray(providers) || providers.length === 0) {
-      list.innerHTML = `<p class="ocp-drawer__empty-config">No provider profiles yet. Choose New Provider to add one.</p>`;
+      list.innerHTML = `<p class="ocp-drawer__empty-config">No shared storage accounts yet. Choose + to add one.</p>`;
       return;
     }
     list.innerHTML = providers.map((provider) => `
@@ -2157,12 +2801,12 @@
         <span class="ocp-drawer__profile-card-copy">
           <strong>${escapeHtml(provider.name)}</strong>
           <em>${escapeHtml(provider.type)}</em>
-          <small>${escapeHtml(provider.remote?.host || provider.remote?.rclone_remote || provider.remote?.share || "Connected provider")}</small>
+          <small>${escapeHtml(provider.remote?.host || provider.remote?.rclone_remote || provider.remote?.share || "Connected storage")}</small>
         </span>
         <div class="ocp-drawer__profile-card-actions">
-          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-test" aria-label="Test ${escapeHtml(provider.name)}" title="Test storage provider">✓</button>
-          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-edit" aria-label="Edit ${escapeHtml(provider.name)}" title="Edit storage provider">✎</button>
-          <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__provider-delete" aria-label="Delete ${escapeHtml(provider.name)}" title="Delete storage provider">×</button>
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-test" aria-label="Test ${escapeHtml(provider.name)}" title="Test shared storage account">✓</button>
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__provider-edit" aria-label="Edit ${escapeHtml(provider.name)}" title="Edit shared storage account">✎</button>
+          <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__provider-delete" aria-label="Delete ${escapeHtml(provider.name)}" title="Delete shared storage account">×</button>
         </div>
         <small class="ocp-drawer__provider-test-status" hidden></small>
       </div>
@@ -2179,7 +2823,7 @@
       updateWorkspaceFolderMappingProviderFields(container);
       return providers;
     } catch (error) {
-      if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Storage providers unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+      if (list) list.innerHTML = `<p class="ocp-drawer__empty-config">Shared storage accounts unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
       return [];
     }
   }
@@ -2210,10 +2854,10 @@
     showSavedSecretPlaceholder(tokenInput);
     if (clientIdInput) clientIdInput.value = provider.remote?.client_id || "";
     showSavedSecretPlaceholder(clientSecretInput);
-    if (saveButton) saveButton.textContent = "Update Provider";
+    if (saveButton) saveButton.textContent = "Update Storage Account";
     container.querySelector(".ocp-drawer__provider-cancel-edit")?.classList.remove("ocp-drawer__mount-field--hidden");
     const title = container.querySelector(".ocp-drawer__provider-editor-title");
-    if (title) title.textContent = "Edit Storage Provider";
+    if (title) title.textContent = "Edit shared storage account";
     const detail = container.querySelector(".ocp-drawer__provider-save-detail");
     if (detail) detail.textContent = `Editing ${provider.name || provider.id}. Leave password, private key, token, or client secret blank to keep saved secrets.`;
     updateStorageProviderFields(container);
@@ -2245,12 +2889,12 @@
     const typeInput = container.querySelector(".ocp-drawer__provider-type");
     if (typeInput) typeInput.value = "google_drive";
     const saveButton = container.querySelector(".ocp-drawer__provider-save");
-    if (saveButton) saveButton.textContent = "Save Provider";
+    if (saveButton) saveButton.textContent = "Save Storage Account";
     container.querySelector(".ocp-drawer__provider-cancel-edit")?.classList.add("ocp-drawer__mount-field--hidden");
     const title = container.querySelector(".ocp-drawer__provider-editor-title");
-    if (title) title.textContent = "New Storage Provider";
+    if (title) title.textContent = "New shared storage account";
     const detail = container.querySelector(".ocp-drawer__provider-save-detail");
-    if (detail) detail.textContent = "Storage providers save reusable account/server details only.";
+    if (detail) detail.textContent = "Storage accounts save reusable credentials only. Choose the synced folder in the next section.";
     updateStorageProviderFields(container);
   }
 
@@ -2287,12 +2931,12 @@
     if (pathInput) pathInput.value = mount.remote?.path || mount.remote?.share || "";
     if (readOnly) readOnly.checked = Boolean(mount.options?.read_only);
     if (autoReconnect) autoReconnect.checked = Boolean(mount.options?.auto_reconnect);
-    if (saveButton) saveButton.textContent = "Update Mapping";
+    if (saveButton) saveButton.textContent = "Update Synced Folder";
     cancelButton?.classList.remove("ocp-drawer__mount-field--hidden");
     const title = container.querySelector(".ocp-drawer__mount-editor-title");
-    if (title) title.textContent = "Edit Workspace Folder Mapping";
+    if (title) title.textContent = "Edit synced workspace folder";
     const detail = container.querySelector(".ocp-drawer__mount-save-detail");
-    if (detail) detail.textContent = `Editing ${mount.name || mount.id}. Update the provider folder or local workspace folder, then save.`;
+    if (detail) detail.textContent = `Editing ${mount.name || mount.id}. Update the shared folder or local mount folder, then save.`;
     updateWorkspaceFolderMappingProviderFields(container);
   }
 
@@ -2305,10 +2949,10 @@
     if (nameInput) nameInput.value = "";
     if (pathInput) pathInput.value = "";
     const saveButton = container.querySelector(".ocp-drawer__mount-save");
-    if (saveButton) saveButton.textContent = "Save Mapping";
+    if (saveButton) saveButton.textContent = "Save Synced Folder";
     container.querySelector(".ocp-drawer__mount-cancel-edit")?.classList.add("ocp-drawer__mount-field--hidden");
     const title = container.querySelector(".ocp-drawer__mount-editor-title");
-    if (title) title.textContent = "New Workspace Folder Mapping";
+    if (title) title.textContent = "New synced workspace folder";
   }
 
   function showWorkspaceFolderMappingEditor(container) {
@@ -2376,13 +3020,13 @@
     if (type === "smb") {
       if (hostLabel) hostLabel.textContent = "SMB host";
       if (hostInput) hostInput.placeholder = "nas.local";
-      if (detail) detail.textContent = "Save the SMB server/account here. Choose the share path in Workspace Folder Mapping.";
+      if (detail) detail.textContent = "Save the SMB server/account here. Choose the shared folder in Synced Workspace Folders.";
     } else if (type === "ssh") {
       if (hostLabel) hostLabel.textContent = "Host";
       if (hostInput) hostInput.placeholder = "server.local";
-      if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the remote folder in Workspace Folder Mapping.";
+      if (detail) detail.textContent = "Save the SSH/SFTP server here. Choose the shared folder in Synced Workspace Folders.";
     } else if (detail) {
-      detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Workspace Folder Mapping.";
+      detail.textContent = "Save the Google Drive account here. Choose the Drive folder in Synced Workspace Folders.";
     }
   }
 
@@ -2401,7 +3045,7 @@
     } else {
       autoReconnect.disabled = false;
       if (detail && !container.querySelector(".ocp-drawer__mount-edit-id")?.value) {
-        detail.textContent = type ? "Save the workspace folder mapping, then use Test or Connect below." : "Choose a storage provider first.";
+        detail.textContent = type ? "Save the synced workspace folder, then use Test or Connect below." : "Choose a shared storage account first.";
       }
     }
   }
@@ -2445,7 +3089,7 @@
     if (!providerId) {
       if (list) {
         list.hidden = false;
-        list.innerHTML = `<p class="ocp-drawer__browse-empty">Choose a storage provider first.</p>`;
+        list.innerHTML = `<p class="ocp-drawer__browse-empty">Choose a shared storage account first.</p>`;
       }
       return;
     }
@@ -2555,7 +3199,7 @@
     container.querySelector(".ocp-drawer__mount-new")?.addEventListener("click", () => {
       clearWorkspaceFolderMappingEdit(container);
       const detail = container.querySelector(".ocp-drawer__mount-save-detail");
-      if (detail) detail.textContent = "Choose a storage provider first.";
+      if (detail) detail.textContent = "Choose a shared storage account first.";
       updateWorkspaceFolderMappingProviderFields(container);
     });
     container.querySelector(".ocp-drawer__provider-save")?.addEventListener("click", async () => {
@@ -2608,7 +3252,7 @@
           secret.username = username;
           secret.password = password;
         }
-        if (detail) detail.textContent = "Saving storage provider...";
+        if (detail) detail.textContent = "Saving shared storage account...";
         if (editId) {
           await updateStorageProvider(editId, { name: providerName, type, remote, secret });
         } else {
@@ -2618,10 +3262,10 @@
         hideStorageProviderEditor(container);
         clearSecretField(container.querySelector(".ocp-drawer__provider-google-token"));
         container.querySelector(".ocp-drawer__provider-google-client-secret").value = "";
-        if (detail) detail.textContent = editId ? "Storage provider updated." : "Storage provider saved.";
+        if (detail) detail.textContent = editId ? "Shared storage account updated." : "Shared storage account saved.";
         await refreshStorageProviders(container);
       } catch (error) {
-        if (detail) detail.textContent = `Provider save failed: ${error instanceof Error ? error.message : String(error)}`;
+        if (detail) detail.textContent = `Shared storage save failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     });
     container.querySelector(".ocp-drawer__mount-save")?.addEventListener("click", async () => {
@@ -2637,10 +3281,10 @@
       const editId = container.querySelector(".ocp-drawer__mount-edit-id")?.value || "";
       const remote = { path: remotePath, share: remotePath };
       if (!providerId) {
-        if (detail) detail.textContent = "Save a storage provider first.";
+        if (detail) detail.textContent = "Save a shared storage account first.";
         return;
       }
-      if (detail) detail.textContent = "Saving workspace folder mapping...";
+      if (detail) detail.textContent = "Saving synced workspace folder...";
       try {
         const payload = {
           name,
@@ -2659,7 +3303,7 @@
         }
         clearWorkspaceFolderMappingEdit(container);
         hideWorkspaceFolderMappingEditor(container);
-        if (detail) detail.textContent = editId ? "Workspace folder mapping updated." : "Workspace folder mapping saved. Use Connect below.";
+        if (detail) detail.textContent = editId ? "Synced workspace folder updated." : "Synced workspace folder saved. Use Connect below.";
         await refreshMounts(container);
       } catch (error) {
         if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -2668,7 +3312,7 @@
     container.querySelector(".ocp-drawer__mount-cancel-edit")?.addEventListener("click", () => {
       clearWorkspaceFolderMappingEdit(container);
       hideWorkspaceFolderMappingEditor(container);
-      container.querySelector(".ocp-drawer__mount-save-detail").textContent = "Choose a storage provider first.";
+      container.querySelector(".ocp-drawer__mount-save-detail").textContent = "Choose a shared storage account first.";
     });
     container.addEventListener("click", async (event) => {
       const providerRow = event.target?.closest?.(".ocp-drawer__provider-row");
@@ -2687,7 +3331,7 @@
         if (statusLine) {
           statusLine.hidden = false;
           statusLine.classList.remove("ocp-drawer__provider-test-status--ok", "ocp-drawer__provider-test-status--error");
-          statusLine.textContent = "Testing provider...";
+            statusLine.textContent = "Testing shared storage account...";
         }
         try {
           const result = await testStorageProvider(providerRow.dataset.providerId);
@@ -2696,12 +3340,12 @@
           if (statusLine) {
             statusLine.classList.toggle("ocp-drawer__provider-test-status--ok", ok);
             statusLine.classList.toggle("ocp-drawer__provider-test-status--error", !ok);
-            statusLine.textContent = ok ? "Provider test passed." : `Provider test failed: ${status.last_error || mountStatusLabel(status.status || "error")}`;
+            statusLine.textContent = ok ? "Shared storage test passed." : `Shared storage test failed: ${status.last_error || mountStatusLabel(status.status || "error")}`;
           }
         } catch (error) {
           if (statusLine) {
             statusLine.classList.add("ocp-drawer__provider-test-status--error");
-            statusLine.textContent = `Provider test failed: ${error instanceof Error ? error.message : String(error)}`;
+            statusLine.textContent = `Shared storage test failed: ${error instanceof Error ? error.message : String(error)}`;
           }
         } finally {
           if (button) {
@@ -2712,12 +3356,12 @@
         return;
       }
       if (providerRow && event.target.closest?.(".ocp-drawer__provider-delete")) {
-          if (!window.confirm("Delete this storage provider? Workspace folder mappings will not be deleted.")) return;
+          if (!window.confirm("Delete this shared storage account? Existing synced workspace folders will not be deleted.")) return;
         try {
           await deleteStorageProvider(providerRow.dataset.providerId);
           await refreshStorageProviders(container);
         } catch (error) {
-          window.alert(`Provider delete failed: ${error instanceof Error ? error.message : String(error)}`);
+          window.alert(`Shared storage delete failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         return;
       }
@@ -2745,21 +3389,21 @@
           beginWorkspaceFolderMappingEdit(container, mounts.find((item) => item.id === id));
           return;
         } else if (deleteButton) {
-          if (!window.confirm("Delete this mount configuration? The remote files will not be deleted.")) return;
+          if (!window.confirm("Delete this synced workspace folder? The remote files will not be deleted.")) return;
           await deleteMount(id);
         } else if (actionButton) {
           const action = actionButton.dataset.action;
-          const label = action === "test" ? "Testing Workspace Folder Mapping" : action === "connect" ? (actionButton.textContent.trim() || "Running Workspace Folder Mapping") : "Updating Workspace Folder Mapping";
-          const overlay = showWorkspaceFolderMappingOverlay(document.querySelector("#opencode-plus-drawer"), label, action === "test" ? "Checking the provider and remote folder..." : "Starting the workspace folder mapping action...");
+          const label = action === "test" ? "Testing Synced Workspace Folder" : action === "connect" ? (actionButton.textContent.trim() || "Connecting Synced Workspace Folder") : "Updating Synced Workspace Folder";
+          const overlay = showWorkspaceFolderMappingOverlay(document.querySelector("#opencode-plus-drawer"), label, action === "test" ? "Checking the shared storage account and remote folder..." : "Starting the synced workspace folder action...");
           try {
             const result = await mountAction(id, action);
             await refreshMountsUntilSettled(container, id);
             if (action === "test") {
               const status = result?.status || {};
               const ok = result?.ok || status.status === "connected" || status.status === "synced";
-              finishWorkspaceFolderMappingOverlay(overlay, ok ? "Test Passed" : "Test Failed", ok ? "The provider and remote folder are reachable." : (status.last_error || `Status: ${mountStatusLabel(status.status || "error")}`));
+              finishWorkspaceFolderMappingOverlay(overlay, ok ? "Test Passed" : "Test Failed", ok ? "The shared storage account and remote folder are reachable." : (status.last_error || `Status: ${mountStatusLabel(status.status || "error")}`));
             } else {
-              finishWorkspaceFolderMappingOverlay(overlay, "Action Complete", "Workspace folder mapping status has been refreshed.");
+              finishWorkspaceFolderMappingOverlay(overlay, "Action Complete", "Synced workspace folder status has been refreshed.");
             }
           } catch (error) {
             finishWorkspaceFolderMappingOverlay(overlay, action === "test" ? "Test Failed" : "Action Failed", error instanceof Error ? error.message : String(error));
@@ -2770,7 +3414,7 @@
         }
         await refreshMounts(container);
       } catch (error) {
-        window.alert(`Mount action failed: ${error instanceof Error ? error.message : String(error)}`);
+        window.alert(`Synced workspace folder action failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
   }

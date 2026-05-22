@@ -199,6 +199,11 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/config", configHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/soul/status", soulStatusHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/soul/project", protectedHandler(auth, cfg, cache, soulProjectHandler(cfg)))
+	mux.HandleFunc("/__opencode-plus/soul/projects", soulProjectsHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/soul/projects/", protectedHandler(auth, cfg, cache, soulProjectItemHandler(cfg)))
+	mux.HandleFunc("/__opencode-plus/soul/workspaces", soulWorkspacesHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/soul/project/new", protectedHandler(auth, cfg, cache, soulNewProjectHandler(cfg)))
+	mux.HandleFunc("/__opencode-plus/soul/deployments/", protectedHandler(auth, cfg, cache, soulDeploymentHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/config", openCodeConfigHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
 	mux.HandleFunc("/__opencode-plus/gateway/restart", protectedHandler(auth, cfg, cache, restartGatewayHandler()))
@@ -639,15 +644,18 @@ func plusHealthHandler(cfg config, upstream *url.URL) http.HandlerFunc {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		payload := map[string]any{
 			"ok":               true,
 			"service":          "opencode-plus-ui-gateway",
 			"ui_enabled":       cfg.UIEnabled,
 			"external_ui":      cfg.UIAssetDir != "",
 			"upstream_url":     upstream.String(),
 			"opencode_version": currentOpenCodeVersion(),
-			"support":          supportVersionInfo(cfg),
-		})
+		}
+		if r.URL.Query().Get("support") == "1" {
+			payload["support"] = supportVersionInfo(cfg)
+		}
+		writeJSON(w, http.StatusOK, payload)
 	}
 }
 
@@ -781,16 +789,310 @@ func soulProjectHandler(cfg config) http.HandlerFunc {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_path_failed", "detail": err.Error()})
 			return
 		}
+		createdWorkspacePath, err := ensureDeploymentSpacePath(cfg.SoulPBURL, cfg.DeploymentID, spaceID, localPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "workspace_path_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                     true,
+			"project_id":             projectID,
+			"space_id":               spaceID,
+			"deployment_id":          cfg.DeploymentID,
+			"local_path":             localPath,
+			"created_space":          createdSpace,
+			"created_project":        createdProject,
+			"created_project_path":   createdPath,
+			"created_workspace_path": createdWorkspacePath,
+		})
+	}
+}
+
+func soulWorkspacesHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.SoulDBEnabled {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "workspaces": []any{}})
+			return
+		}
+		workspaces, err := listMappedNamedWorkspaces(cfg)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "workspace_list_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "workspaces": workspaces})
+	}
+}
+
+func soulProjectsHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.SoulDBEnabled {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "projects": []any{}})
+			return
+		}
+		projects, err := listMappedSyncedProjects(cfg)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_list_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "projects": projects})
+	}
+}
+
+func soulProjectItemHandler(cfg config) http.HandlerFunc {
+	type updateBody struct {
+		Name string `json:"name"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete && r.Method != http.MethodPatch && r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/soul/projects/"), "/")
+		if id == "" || strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_project_mapping"})
+			return
+		}
+		record, err := findDeploymentProjectPathByRecordID(cfg.SoulPBURL, id)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_mapping_lookup_failed", "detail": err.Error()})
+			return
+		}
+		if record.ID == "" || record.DeploymentID != cfg.DeploymentID {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project_mapping_not_found"})
+			return
+		}
+		if r.Method == http.MethodPatch || r.Method == http.MethodPut {
+			defer r.Body.Close()
+			var body updateBody
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+				return
+			}
+			name := strings.TrimSpace(body.Name)
+			if name == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project_name_required"})
+				return
+			}
+			if err := patchPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_projects", record.ProjectID, map[string]any{"name": name}); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_update_failed", "detail": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": id})
+			return
+		}
+		if err := deletePocketBaseRecord(cfg.SoulPBURL, "opcp_deployment_project_paths", id); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_mapping_delete_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
+	}
+}
+
+func soulNewProjectHandler(cfg config) http.HandlerFunc {
+	type requestBody struct {
+		Name        string `json:"name"`
+		WorkspaceID string `json:"workspace_id"`
+		FolderName  string `json:"folder_name"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.SoulDBEnabled {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sync_disabled", "detail": "Synchronization database features are disabled."})
+			return
+		}
+		connected, detail := checkPocketBaseHealth(cfg.SoulPBURL)
+		if !connected {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pocketbase_unreachable", "detail": detail})
+			return
+		}
+		schemaReady, _, _ := checkSoulSchema(cfg.SoulPBURL)
+		if !schemaReady {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "schema_missing", "detail": "Synchronization schema is not initialized."})
+			return
+		}
+
+		defer r.Body.Close()
+		var body requestBody
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
+			return
+		}
+		name := strings.TrimSpace(body.Name)
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project_name_required"})
+			return
+		}
+		workspace, err := findMappedNamedWorkspace(cfg, strings.TrimSpace(body.WorkspaceID))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "workspace_lookup_failed", "detail": err.Error()})
+			return
+		}
+		if workspace.ID == "" || !filepath.IsAbs(workspace.LocalPath) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "named_workspace_required"})
+			return
+		}
+		parent := filepath.Clean(workspace.LocalPath)
+		folderName := sanitizeProjectFolderName(body.FolderName)
+		if folderName == "" {
+			folderName = sanitizeProjectFolderName(name)
+		}
+		if folderName == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_folder_name"})
+			return
+		}
+		projectPath := filepath.Clean(filepath.Join(parent, folderName))
+		parentWithSep := strings.TrimRight(parent, string(filepath.Separator)) + string(filepath.Separator)
+		if projectPath == parent || !strings.HasPrefix(projectPath, parentWithSep) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_project_path"})
+			return
+		}
+		if _, err := os.Stat(projectPath); err == nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "project_path_exists", "detail": projectPath})
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project_path_check_failed", "detail": err.Error()})
+			return
+		}
+		if err := os.MkdirAll(projectPath, 0o755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project_directory_create_failed", "detail": err.Error()})
+			return
+		}
+		spaceID, _, err := ensureDefaultNamedSpace(cfg.SoulPBURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "space_failed", "detail": err.Error()})
+			return
+		}
+		projectID, createdProject, err := ensureSyncedProject(cfg.SoulPBURL, name, spaceID, projectPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_failed", "detail": err.Error()})
+			return
+		}
+		createdPath, err := ensureDeploymentProjectPath(cfg.SoulPBURL, cfg.DeploymentID, projectID, projectPath)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_path_failed", "detail": err.Error()})
+			return
+		}
+		sessionSync, err := initializeProjectSessionSync(projectPath, projectID, spaceID, cfg.DeploymentID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session_sync_init_failed", "detail": err.Error()})
+			return
+		}
+		encodedPath := encodeOpenCodeProjectPath(projectPath)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":                   true,
 			"project_id":           projectID,
 			"space_id":             spaceID,
+			"workspace_id":         workspace.ID,
+			"workspace_name":       workspace.Name,
 			"deployment_id":        cfg.DeploymentID,
-			"local_path":           localPath,
-			"created_space":        createdSpace,
+			"local_path":           projectPath,
+			"open_url":             "/" + encodedPath + "/session",
 			"created_project":      createdProject,
 			"created_project_path": createdPath,
+			"session_sync":         sessionSync,
 		})
+	}
+}
+
+func sanitizeProjectFolderName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\\", "-")
+	value = strings.ReplaceAll(value, "/", "-")
+	parts := strings.Fields(value)
+	value = strings.Join(parts, "-")
+	value = strings.Trim(value, ".-_")
+	if value == "." || value == ".." {
+		return ""
+	}
+	return value
+}
+
+func initializeProjectSessionSync(projectPath, projectID, spaceID, deploymentID string) (map[string]any, error) {
+	root := filepath.Join(projectPath, ".opencode-plus")
+	sessionsDir := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	manifestPath := filepath.Join(root, "manifest.json")
+	manifest := map[string]any{
+		"version":               1,
+		"kind":                  "opencode-plus-synced-project",
+		"project_id":            projectID,
+		"space_id":              spaceID,
+		"created_by_deployment": deploymentID,
+		"created_at":            now,
+		"session_sync": map[string]any{
+			"enabled":             true,
+			"index":               "pocketbase:opcp_synced_sessions",
+			"payload_dir":         ".opencode-plus/sessions",
+			"payload_description": "Full session payloads live here; PocketBase stores only the lightweight index.",
+		},
+	}
+	body, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	body = append(body, '\n')
+	if err := os.WriteFile(manifestPath, body, 0o644); err != nil {
+		return nil, err
+	}
+	keepPath := filepath.Join(sessionsDir, ".keep")
+	if _, err := os.Stat(keepPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(keepPath, []byte("OpenCode Plus synced session payloads will be stored here.\n"), 0o644); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"enabled":       true,
+		"manifest_path": filepath.ToSlash(filepath.Join(".opencode-plus", "manifest.json")),
+		"payload_dir":   filepath.ToSlash(filepath.Join(".opencode-plus", "sessions")),
+		"index":         "pocketbase:opcp_synced_sessions",
+	}, nil
+}
+
+func soulDeploymentHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/soul/deployments/"), "/")
+		if id == "" || strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_deployment_record"})
+			return
+		}
+		record, err := findPocketBaseDeploymentByRecordID(cfg.SoulPBURL, id)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "deployment_lookup_failed", "detail": err.Error()})
+			return
+		}
+		if record.ID == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "deployment_not_found"})
+			return
+		}
+		if record.DeploymentID == cfg.DeploymentID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot_delete_current_deployment"})
+			return
+		}
+		if err := deletePocketBaseRecord(cfg.SoulPBURL, "opcp_deployments", id); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "deployment_delete_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 	}
 }
 
@@ -816,6 +1118,51 @@ type pocketBaseDeploymentRecord struct {
 	Metadata     map[string]any `json:"metadata"`
 	Created      string         `json:"created"`
 	Updated      string         `json:"updated"`
+}
+
+type pocketBaseNamedSpaceRecord struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type pocketBaseDeploymentSpacePathRecord struct {
+	ID           string `json:"id"`
+	DeploymentID string `json:"deployment_id"`
+	SpaceID      string `json:"space_id"`
+	LocalPath    string `json:"local_path"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type pocketBaseSyncedProjectRecord struct {
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	SpaceID  string         `json:"space_id"`
+	Enabled  bool           `json:"enabled"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+type pocketBaseDeploymentProjectPathRecord struct {
+	ID           string `json:"id"`
+	DeploymentID string `json:"deployment_id"`
+	ProjectID    string `json:"project_id"`
+	LocalPath    string `json:"local_path"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type mappedSyncedProject struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	LocalPath string `json:"local_path"`
+	OpenURL   string `json:"open_url"`
+}
+
+type mappedNamedWorkspace struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	LocalPath  string `json:"local_path"`
+	RemotePath string `json:"remote_path,omitempty"`
+	Provider   string `json:"provider,omitempty"`
 }
 
 type pocketBaseIDRecord struct {
@@ -877,10 +1224,224 @@ func ensureDeploymentProjectPath(baseURL, deploymentID, projectID, localPath str
 	return true, err
 }
 
+func ensureDeploymentSpacePath(baseURL, deploymentID, spaceID, localPath string) (bool, error) {
+	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("deployment_id = %q && space_id = %q", strings.ReplaceAll(deploymentID, `"`, `\"`), strings.ReplaceAll(spaceID, `"`, `\"`))}}
+	if id, err := firstPocketBaseRecordID(baseURL, "opcp_deployment_space_paths", query); err != nil || id != "" {
+		if err != nil {
+			return false, err
+		}
+		return false, patchPocketBaseRecord(baseURL, "opcp_deployment_space_paths", id, map[string]any{"local_path": localPath, "enabled": true})
+	}
+	_, err := createPocketBaseRecordReturning(baseURL, "opcp_deployment_space_paths", map[string]any{
+		"deployment_id": deploymentID,
+		"space_id":      spaceID,
+		"local_path":    localPath,
+		"enabled":       true,
+	})
+	return true, err
+}
+
+func listMappedNamedWorkspaces(cfg config) ([]mappedNamedWorkspace, error) {
+	store, err := readMountStore(cfg.MountsDir)
+	if err != nil {
+		return nil, err
+	}
+	providers := make(map[string]storageProvider, len(store.Providers))
+	for _, provider := range store.Providers {
+		providers[provider.ID] = provider
+	}
+	workspaces := make([]mappedNamedWorkspace, 0, len(store.Mounts))
+	for _, mount := range store.Mounts {
+		if strings.TrimSpace(mount.MountPath) == "" {
+			continue
+		}
+		provider := providers[mount.Remote["provider_id"]]
+		providerName := provider.Name
+		if providerName == "" {
+			providerName = mount.Remote["rclone_remote"]
+		}
+		workspaces = append(workspaces, mappedNamedWorkspace{
+			ID:         mount.ID,
+			Name:       mount.Name,
+			LocalPath:  mount.MountPath,
+			RemotePath: firstNonEmpty(mount.Remote["path"], mount.Remote["share"]),
+			Provider:   providerName,
+		})
+	}
+	return workspaces, nil
+}
+
+func findMappedNamedWorkspace(cfg config, workspaceID string) (mappedNamedWorkspace, error) {
+	workspaces, err := listMappedNamedWorkspaces(cfg)
+	if err != nil {
+		return mappedNamedWorkspace{}, err
+	}
+	for _, workspace := range workspaces {
+		if workspace.ID == workspaceID {
+			return workspace, nil
+		}
+	}
+	return mappedNamedWorkspace{}, nil
+}
+
+func readMountStore(configDir string) (mountStore, error) {
+	if strings.TrimSpace(configDir) == "" {
+		configDir = "/config/persist/opencode-plus-mounts"
+	}
+	body, err := os.ReadFile(filepath.Join(configDir, "config.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return mountStore{}, nil
+	}
+	if err != nil {
+		return mountStore{}, err
+	}
+	var store mountStore
+	if err := json.Unmarshal(body, &store); err != nil {
+		return mountStore{}, err
+	}
+	return store, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func listNamedSpaces(baseURL string) ([]pocketBaseNamedSpaceRecord, error) {
+	query := url.Values{"perPage": {"100"}}
+	var parsed struct {
+		Items []pocketBaseNamedSpaceRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_named_spaces", query, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Items, nil
+}
+
+func listDeploymentSpacePaths(baseURL, deploymentID string) ([]pocketBaseDeploymentSpacePathRecord, error) {
+	query := url.Values{"perPage": {"100"}, "filter": {fmt.Sprintf("deployment_id = %q", strings.ReplaceAll(deploymentID, `"`, `\"`))}}
+	var parsed struct {
+		Items []pocketBaseDeploymentSpacePathRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_deployment_space_paths", query, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Items, nil
+}
+
 func deploymentProjectPathExists(baseURL, deploymentID, localPath string) (bool, error) {
 	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("deployment_id = %q && local_path = %q && enabled = true", strings.ReplaceAll(deploymentID, `"`, `\"`), strings.ReplaceAll(localPath, `"`, `\"`))}}
 	id, err := firstPocketBaseRecordID(baseURL, "opcp_deployment_project_paths", query)
 	return id != "", err
+}
+
+func listMappedSyncedProjects(cfg config) ([]mappedSyncedProject, error) {
+	projects, err := listSyncedProjects(cfg.SoulPBURL)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := listDeploymentProjectPaths(cfg.SoulPBURL, cfg.DeploymentID)
+	if err != nil {
+		return nil, err
+	}
+	workspaces, err := listMappedNamedWorkspaces(cfg)
+	if err != nil {
+		return nil, err
+	}
+	workspaceRoots := make([]string, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		if strings.TrimSpace(workspace.LocalPath) != "" {
+			workspaceRoots = append(workspaceRoots, filepath.Clean(workspace.LocalPath))
+		}
+	}
+	projectNames := make(map[string]string, len(projects))
+	for _, project := range projects {
+		projectNames[project.ID] = project.Name
+	}
+	mapped := make([]mappedSyncedProject, 0, len(paths))
+	for _, path := range paths {
+		if !path.Enabled || strings.TrimSpace(path.LocalPath) == "" {
+			continue
+		}
+		if !pathIsInsideAnyRoot(path.LocalPath, workspaceRoots) {
+			continue
+		}
+		openURL := "/" + encodeOpenCodeProjectPath(path.LocalPath) + "/session"
+		mapped = append(mapped, mappedSyncedProject{ID: path.ID, ProjectID: path.ProjectID, Name: projectNames[path.ProjectID], LocalPath: path.LocalPath, OpenURL: openURL})
+	}
+	return mapped, nil
+}
+
+func encodeOpenCodeProjectPath(path string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(filepath.Clean(path)))
+}
+
+func pathIsInsideAnyRoot(path string, roots []string) bool {
+	cleanPath := filepath.Clean(path)
+	for _, root := range roots {
+		cleanRoot := filepath.Clean(root)
+		if cleanRoot == "." || cleanRoot == string(filepath.Separator) || cleanPath == cleanRoot {
+			continue
+		}
+		prefix := strings.TrimRight(cleanRoot, string(filepath.Separator)) + string(filepath.Separator)
+		if strings.HasPrefix(cleanPath, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func listSyncedProjects(baseURL string) ([]pocketBaseSyncedProjectRecord, error) {
+	query := url.Values{"perPage": {"100"}}
+	var parsed struct {
+		Items []pocketBaseSyncedProjectRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_synced_projects", query, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Items, nil
+}
+
+func listDeploymentProjectPaths(baseURL, deploymentID string) ([]pocketBaseDeploymentProjectPathRecord, error) {
+	query := url.Values{"perPage": {"100"}, "filter": {fmt.Sprintf("deployment_id = %q", strings.ReplaceAll(deploymentID, `"`, `\"`))}}
+	var parsed struct {
+		Items []pocketBaseDeploymentProjectPathRecord `json:"items"`
+	}
+	if err := getPocketBaseJSON(baseURL, "opcp_deployment_project_paths", query, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Items, nil
+}
+
+func findDeploymentProjectPathByRecordID(baseURL, id string) (pocketBaseDeploymentProjectPathRecord, error) {
+	var record pocketBaseDeploymentProjectPathRecord
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/collections/opcp_deployment_project_paths/records/" + url.PathEscape(id)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return pocketBaseDeploymentProjectPathRecord{}, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return pocketBaseDeploymentProjectPathRecord{}, err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode == http.StatusNotFound {
+		return pocketBaseDeploymentProjectPathRecord{}, nil
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return pocketBaseDeploymentProjectPathRecord{}, fmt.Errorf("PocketBase project mapping lookup failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, &record); err != nil {
+		return pocketBaseDeploymentProjectPathRecord{}, err
+	}
+	return record, nil
 }
 
 func firstPocketBaseRecordID(baseURL, collection string, query url.Values) (string, error) {
@@ -955,6 +1516,33 @@ func findPocketBaseDeployment(baseURL, deploymentID string) (pocketBaseDeploymen
 	return parsed.Items[0], nil
 }
 
+func findPocketBaseDeploymentByRecordID(baseURL, id string) (pocketBaseDeploymentRecord, error) {
+	var record pocketBaseDeploymentRecord
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/collections/opcp_deployments/records/" + url.PathEscape(id)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return pocketBaseDeploymentRecord{}, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return pocketBaseDeploymentRecord{}, err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode == http.StatusNotFound {
+		return pocketBaseDeploymentRecord{}, nil
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return pocketBaseDeploymentRecord{}, fmt.Errorf("PocketBase deployment lookup failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, &record); err != nil {
+		return pocketBaseDeploymentRecord{}, err
+	}
+	return record, nil
+}
+
 func listPocketBaseDeployments(baseURL string) ([]pocketBaseDeploymentRecord, error) {
 	query := url.Values{}
 	query.Set("perPage", "50")
@@ -1013,6 +1601,26 @@ func createPocketBaseRecordReturning(baseURL, collection string, payload map[str
 func patchPocketBaseRecord(baseURL, collection, id string, payload map[string]any) error {
 	_, err := writePocketBaseRecord(http.MethodPatch, strings.TrimRight(baseURL, "/")+"/api/collections/"+url.PathEscape(collection)+"/records/"+url.PathEscape(id), payload)
 	return err
+}
+
+func deletePocketBaseRecord(baseURL, collection, id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/collections/" + url.PathEscape(collection) + "/records/" + url.PathEscape(id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("PocketBase delete failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func writePocketBaseRecord(method, endpoint string, payload map[string]any) ([]byte, error) {
@@ -1089,6 +1697,7 @@ func checkSoulSchema(baseURL string) (bool, map[string]any, int) {
 		"plugins_hooks":   "opcp_assets",
 		"named_spaces":    "opcp_named_spaces",
 		"synced_projects": "opcp_synced_projects",
+		"synced_sessions": "opcp_synced_sessions",
 	}
 	features := map[string]any{}
 	ready := true

@@ -68,6 +68,18 @@ write_gateway_env() {
   local skip_aud="${CF_ACCESS_SKIP_AUD:-false}"
   local basic_user="${OPENCODE_BASIC_USER:-${OPENCODE_SERVER_USERNAME:-}}"
   local basic_password="${OPENCODE_BASIC_PASSWORD:-${OPENCODE_SERVER_PASSWORD:-}}"
+  local plus_config_file="${OPENCODE_PLUS_CONFIG_FILE:-/config/persist/opencode-plus-config.json}"
+  local configured_instance=""
+
+  if [[ -f "${plus_config_file}" ]]; then
+    configured_instance="$(python3 - "${plus_config_file}" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    value = json.load(fh).get("instance_name", "")
+print(value.strip() if isinstance(value, str) else "")
+PY
+)"
+  fi
 
   if [[ "${skip_aud}" != "true" && -z "${CF_ACCESS_AUD:-}" ]]; then
     echo "OPENCODE_CF_AUTH_ENABLED=true requires CF_ACCESS_AUD unless CF_ACCESS_SKIP_AUD=true" >&2
@@ -101,8 +113,14 @@ write_gateway_env() {
     printf 'OPENCODE_PLUS_AUTH_STATE_FILE=%q\n' "${OPENCODE_PLUS_AUTH_STATE_FILE:-/config/persist/opencode-plus-auth-state.json}"
     printf 'OPENCODE_PLUS_QUOTA_URL=%q\n' "${OPENCODE_PLUS_QUOTA_URL:-http://127.0.0.1:18765/quota}"
     printf 'OPENCODE_PLUS_SECRETS_DIR=%q\n' "${OPENCODE_PLUS_SECRETS_DIR:-/config/persist/opencode-plus-secrets}"
-    printf 'OPENCODE_PLUS_CONFIG_FILE=%q\n' "${OPENCODE_PLUS_CONFIG_FILE:-/config/persist/opencode-plus-config.json}"
+    printf 'OPENCODE_PLUS_CONFIG_FILE=%q\n' "${plus_config_file}"
     printf 'OPENCODE_CONFIG_FILE=%q\n' "${OPENCODE_CONFIG_FILE:-/root/aiplayground/opencode.json}"
+    if [[ -n "${configured_instance:-${OPENCODE_PLUS_DEPLOYMENT_ID:-}}" ]]; then
+      printf 'OPENCODE_PLUS_DEPLOYMENT_ID=%q\n' "${configured_instance:-${OPENCODE_PLUS_DEPLOYMENT_ID}}"
+    fi
+    if [[ -n "${configured_instance:-${OPENCODE_PLUS_DEPLOYMENT_NAME:-}}" ]]; then
+      printf 'OPENCODE_PLUS_DEPLOYMENT_NAME=%q\n' "${configured_instance:-${OPENCODE_PLUS_DEPLOYMENT_NAME}}"
+    fi
   } > "${env_file}"
   chmod 600 "${env_file}" || true
 }

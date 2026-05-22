@@ -421,3 +421,123 @@ func TestSyncDeploymentHeartbeatCreatesAndListsDeployment(t *testing.T) {
 		t.Fatalf("deployment record mismatch: %#v", items[0])
 	}
 }
+
+func TestSoulDeploymentHandlerDeletesNonCurrentRecord(t *testing.T) {
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/api/collections/opcp_deployments/records/rec-old") {
+			t.Fatalf("unexpected PocketBase path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"id": "rec-old", "deployment_id": "old-instance", "name": "old-instance", "enabled": true})
+		case http.MethodDelete:
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config{SoulPBURL: server.URL, DeploymentID: "current-instance"}
+	req := httptest.NewRequest(http.MethodDelete, "https://opencode-test.example/__opencode-plus/soul/deployments/rec-old", nil)
+	recorder := httptest.NewRecorder()
+	soulDeploymentHandler(cfg)(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !deleted {
+		t.Fatal("expected stale deployment record to be deleted")
+	}
+}
+
+func TestSoulDeploymentHandlerRejectsCurrentRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			t.Fatal("current deployment should not be deleted")
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": "rec-current", "deployment_id": "current-instance", "name": "current-instance", "enabled": true})
+	}))
+	defer server.Close()
+
+	cfg := config{SoulPBURL: server.URL, DeploymentID: "current-instance"}
+	req := httptest.NewRequest(http.MethodDelete, "https://opencode-test.example/__opencode-plus/soul/deployments/rec-current", nil)
+	recorder := httptest.NewRecorder()
+	soulDeploymentHandler(cfg)(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestSoulNewProjectHandlerCreatesDirectoryAndRegistersProject(t *testing.T) {
+	tmp := t.TempDir()
+	createdCollections := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/api/health") {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/")
+		collection := ""
+		for i, part := range parts {
+			if part == "collections" && i+1 < len(parts) {
+				collection = parts[i+1]
+				break
+			}
+		}
+		if collection == "" {
+			t.Fatalf("unexpected PocketBase path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			switch collection {
+			case "opcp_named_spaces":
+				writeJSON(w, http.StatusOK, map[string]any{"items": []any{map[string]any{"id": "space-id", "name": "default"}}, "totalItems": 1})
+			case "opcp_deployment_space_paths":
+				writeJSON(w, http.StatusOK, map[string]any{"items": []any{map[string]any{"id": "space-path-id", "space_id": "space-id", "local_path": tmp, "enabled": true}}, "totalItems": 1})
+			default:
+				writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "totalItems": 0})
+			}
+		case http.MethodPost:
+			createdCollections[collection] = true
+			writeJSON(w, http.StatusOK, map[string]any{"id": collection + "-id"})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	mountsDir := filepath.Join(tmp, "mount-config")
+	if err := os.MkdirAll(mountsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mountRoot := filepath.Join(tmp, "gdrive")
+	if err := os.WriteFile(filepath.Join(mountsDir, "config.json"), []byte(`{"mounts":[{"id":"mnt-test","name":"gdrive","type":"google_drive","mount_path":"`+mountRoot+`","remote":{"path":"opencode-plus"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{SoulDBEnabled: true, SoulPBURL: server.URL, DeploymentID: "opencode-test", MountsDir: mountsDir}
+	body := bytes.NewBufferString(`{"name":"New Project","workspace_id":"mnt-test","folder_name":"new-project"}`)
+	req := httptest.NewRequest(http.MethodPost, "https://opencode-test.example/__opencode-plus/soul/project/new", body)
+	recorder := httptest.NewRecorder()
+	soulNewProjectHandler(cfg)(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(mountRoot, "new-project")); err != nil {
+		t.Fatalf("new project directory missing: %v", err)
+	}
+	for _, collection := range []string{"opcp_synced_projects", "opcp_deployment_project_paths"} {
+		if !createdCollections[collection] {
+			t.Fatalf("expected create in %s, created = %#v", collection, createdCollections)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(mountRoot, "new-project", ".opencode-plus", "manifest.json"),
+		filepath.Join(mountRoot, "new-project", ".opencode-plus", "sessions", ".keep"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("session sync scaffold missing %s: %v", path, err)
+		}
+	}
+}

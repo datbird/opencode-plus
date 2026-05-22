@@ -729,8 +729,8 @@ func (m *mountManager) disconnect(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "fusermount3", "-u", config.MountPath).Run()
-	if ctx.Err() != nil {
+	unmountErr := exec.CommandContext(ctx, "fusermount3", "-u", config.MountPath).Run()
+	if unmountErr != nil || ctx.Err() != nil {
 		lazyCtx, lazyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer lazyCancel()
 		_ = exec.CommandContext(lazyCtx, "fusermount3", "-uz", config.MountPath).Run()
