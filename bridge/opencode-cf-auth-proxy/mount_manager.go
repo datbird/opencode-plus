@@ -621,6 +621,10 @@ func (m *mountManager) connect(id string, manual bool) {
 			m.setFailedState(id, mountStatusError, err)
 			return
 		}
+		if isMountpoint(config.MountPath) {
+			m.markConnected(id, 0)
+			return
+		}
 		m.startMountProcess(id, config, secret)
 		return
 	}
@@ -667,18 +671,24 @@ func (m *mountManager) startMountProcess(id string, config mountConfig, secret m
 	case <-time.After(1200 * time.Millisecond):
 		m.mu.Lock()
 		m.processes[id] = cmd
-		state := m.states[id]
-		state.Status = mountStatusConnected
-		state.LastError = ""
-		state.RetryCount = 0
-		state.NextRetryAt = ""
-		state.PID = cmd.Process.Pid
-		state.ConnectedAt = time.Now().UTC().Format(time.RFC3339)
-		state.LastCheckedAt = state.ConnectedAt
-		m.states[id] = state
-		_ = m.saveStateLocked()
 		m.mu.Unlock()
+		m.markConnected(id, cmd.Process.Pid)
 	}
+}
+
+func (m *mountManager) markConnected(id string, pid int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.states[id]
+	state.Status = mountStatusConnected
+	state.LastError = ""
+	state.RetryCount = 0
+	state.NextRetryAt = ""
+	state.PID = pid
+	state.ConnectedAt = time.Now().UTC().Format(time.RFC3339)
+	state.LastCheckedAt = state.ConnectedAt
+	m.states[id] = state
+	_ = m.saveStateLocked()
 }
 
 func (m *mountManager) syncRcloneRemoteToLocal(id string, config mountConfig) {

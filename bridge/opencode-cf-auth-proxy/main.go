@@ -8,11 +8,16 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"math/big"
@@ -201,10 +206,12 @@ func main() {
 	mux.HandleFunc("/__opencode-plus/soul/project", protectedHandler(auth, cfg, cache, soulProjectHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/soul/projects", soulProjectsHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/soul/projects/", protectedHandler(auth, cfg, cache, soulProjectItemHandler(cfg)))
+	mux.HandleFunc("/__opencode-plus/soul/sessions/sync", protectedHandler(auth, cfg, cache, soulSessionsSyncHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/soul/workspaces", soulWorkspacesHandler(cfg))
 	mux.HandleFunc("/__opencode-plus/soul/project/new", protectedHandler(auth, cfg, cache, soulNewProjectHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/soul/deployments/", protectedHandler(auth, cfg, cache, soulDeploymentHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/config", openCodeConfigHandler(cfg))
+	mux.HandleFunc("/__opencode-plus/opencode/projects/refresh", protectedHandler(auth, cfg, cache, openCodeProjectRefreshHandler(cfg)))
 	mux.HandleFunc("/__opencode-plus/opencode/restart", protectedHandler(auth, cfg, cache, restartOpenCodeHandler()))
 	mux.HandleFunc("/__opencode-plus/gateway/restart", protectedHandler(auth, cfg, cache, restartGatewayHandler()))
 	mux.HandleFunc("/__opencode-plus/opencode/update/check", updateOpenCodeCheckHandler())
@@ -851,11 +858,17 @@ func soulProjectItemHandler(cfg config) http.HandlerFunc {
 		Name string `json:"name"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		trimmedPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/soul/projects/"), "/")
+		parts := strings.Split(trimmedPath, "/")
+		if len(parts) == 2 && parts[1] == "icon" {
+			soulProjectIconHandler(cfg, parts[0])(w, r)
+			return
+		}
 		if r.Method != http.MethodDelete && r.Method != http.MethodPatch && r.Method != http.MethodPut {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/__opencode-plus/soul/projects/"), "/")
+		id := trimmedPath
 		if id == "" || strings.Contains(id, "/") {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_project_mapping"})
 			return
@@ -892,8 +905,122 @@ func soulProjectItemHandler(cfg config) http.HandlerFunc {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_mapping_delete_failed", "detail": err.Error()})
 			return
 		}
+		removeSyncedProjectShortcutForPath(record.LocalPath)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 	}
+}
+
+func soulProjectIconHandler(cfg config, mappingID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		record, err := findDeploymentProjectPathByRecordID(cfg.SoulPBURL, mappingID)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_mapping_lookup_failed", "detail": err.Error()})
+			return
+		}
+		if record.ID == "" || record.DeploymentID != cfg.DeploymentID {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project_mapping_not_found"})
+			return
+		}
+		if err := r.ParseMultipartForm(768 * 1024); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_upload", "detail": err.Error()})
+			return
+		}
+		file, header, err := r.FormFile("icon")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "icon_file_required"})
+			return
+		}
+		defer file.Close()
+		body, err := io.ReadAll(io.LimitReader(file, 512*1024+1))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "icon_read_failed", "detail": err.Error()})
+			return
+		}
+		if len(body) > 512*1024 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "icon_too_large", "detail": "Use a 128x128 PNG, JPEG, or GIF under 512KB."})
+			return
+		}
+		mimeType, ext, err := validateProjectIcon(body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_icon", "detail": err.Error()})
+			return
+		}
+		if strings.TrimSpace(header.Filename) == "" {
+			header.Filename = "project-icon" + ext
+		}
+		iconPath, dataURL, err := writeSyncedProjectIcon(record.LocalPath, body, mimeType, ext)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "icon_write_failed", "detail": err.Error()})
+			return
+		}
+		project, err := findSyncedProjectByRecordID(cfg.SoulPBURL, record.ProjectID)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_lookup_failed", "detail": err.Error()})
+			return
+		}
+		metadata := project.Metadata
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["icon_path"] = filepath.ToSlash(iconPath)
+		metadata["icon_mime"] = mimeType
+		metadata["icon_updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		metadata["icon_updated_by_deployment"] = cfg.DeploymentID
+		if err := patchPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_projects", record.ProjectID, map[string]any{"metadata": metadata}); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_icon_index_failed", "detail": err.Error()})
+			return
+		}
+		if err := applySyncedProjectIcon(record.LocalPath, project.Name, dataURL); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project_icon_apply_failed", "detail": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "project_id": record.ProjectID, "icon_url": dataURL})
+	}
+}
+
+func validateProjectIcon(body []byte) (string, string, error) {
+	config, format, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return "", "", errors.New("Use a PNG, JPEG, or GIF image.")
+	}
+	if config.Width != 128 || config.Height != 128 {
+		return "", "", fmt.Errorf("Image must be exactly 128x128 pixels; got %dx%d.", config.Width, config.Height)
+	}
+	switch format {
+	case "png":
+		return "image/png", ".png", nil
+	case "jpeg":
+		return "image/jpeg", ".jpg", nil
+	case "gif":
+		return "image/gif", ".gif", nil
+	default:
+		return "", "", errors.New("Use a PNG, JPEG, or GIF image.")
+	}
+}
+
+func writeSyncedProjectIcon(projectPath string, body []byte, mimeType, ext string) (string, string, error) {
+	root := filepath.Join(projectPath, ".opencode-plus")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", "", err
+	}
+	for _, oldExt := range []string{".png", ".jpg", ".gif"} {
+		if oldExt != ext {
+			_ = os.Remove(filepath.Join(root, "project-icon"+oldExt))
+		}
+	}
+	iconPath := filepath.Join(root, "project-icon"+ext)
+	tmp := iconPath + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(tmp, iconPath); err != nil {
+		return "", "", err
+	}
+	return filepath.Join(".opencode-plus", "project-icon"+ext), "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(body), nil
 }
 
 func soulNewProjectHandler(cfg config) http.HandlerFunc {
@@ -957,15 +1084,18 @@ func soulNewProjectHandler(cfg config) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_project_path"})
 			return
 		}
-		if _, err := os.Stat(projectPath); err == nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "project_path_exists", "detail": projectPath})
-			return
-		} else if !errors.Is(err, os.ErrNotExist) {
+		if info, err := os.Stat(projectPath); err == nil {
+			if !info.IsDir() {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "project_path_exists", "detail": projectPath})
+				return
+			}
+		} else if errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(projectPath, 0o755); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project_directory_create_failed", "detail": err.Error()})
+				return
+			}
+		} else {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project_path_check_failed", "detail": err.Error()})
-			return
-		}
-		if err := os.MkdirAll(projectPath, 0o755); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project_directory_create_failed", "detail": err.Error()})
 			return
 		}
 		spaceID, _, err := ensureDefaultNamedSpace(cfg.SoulPBURL)
@@ -981,6 +1111,11 @@ func soulNewProjectHandler(cfg config) http.HandlerFunc {
 		createdPath, err := ensureDeploymentProjectPath(cfg.SoulPBURL, cfg.DeploymentID, projectID, projectPath)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "project_path_failed", "detail": err.Error()})
+			return
+		}
+		shortcutPath, err := ensureSyncedProjectShortcut(workspaceRootForShortcut(parent), name, projectPath)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project_shortcut_failed", "detail": err.Error()})
 			return
 		}
 		sessionSync, err := initializeProjectSessionSync(projectPath, projectID, spaceID, cfg.DeploymentID)
@@ -1000,9 +1135,679 @@ func soulNewProjectHandler(cfg config) http.HandlerFunc {
 			"open_url":             "/" + encodedPath + "/session",
 			"created_project":      createdProject,
 			"created_project_path": createdPath,
+			"shortcut_path":        shortcutPath,
 			"session_sync":         sessionSync,
 		})
 	}
+}
+
+func ensureSyncedProjectShortcut(workspaceRoot, projectName, projectPath string) (string, error) {
+	workspaceRoot = filepath.Clean(workspaceRoot)
+	projectPath = filepath.Clean(projectPath)
+	shortcutName := "#OCP-SyncedProject-" + sanitizeProjectFolderName(projectName)
+	if shortcutName == "#OCP-SyncedProject-" {
+		shortcutName += sanitizeProjectFolderName(filepath.Base(projectPath))
+	}
+	shortcutPath := filepath.Join(workspaceRoot, shortcutName)
+	if shortcutPath == projectPath {
+		return shortcutPath, nil
+	}
+	if isMountpointPath(shortcutPath) {
+		return shortcutPath, nil
+	}
+	if target, err := os.Readlink(shortcutPath); err == nil {
+		if filepath.Clean(target) == projectPath {
+			if err := os.Remove(shortcutPath); err != nil {
+				return "", err
+			}
+		} else {
+			return "", fmt.Errorf("shortcut already points elsewhere: %s", shortcutPath)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(shortcutPath, 0o755); err != nil {
+			return "", err
+		}
+	} else {
+		info, statErr := os.Lstat(shortcutPath)
+		if statErr != nil {
+			return "", statErr
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("shortcut path already exists and is not a directory: %s", shortcutPath)
+		}
+		if _, statErr := os.Stat(shortcutPath); statErr != nil {
+			_ = exec.Command("umount", "-l", shortcutPath).Run()
+			_ = os.Remove(shortcutPath)
+			if err := os.MkdirAll(shortcutPath, 0o755); err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := bindMountDirectory(projectPath, shortcutPath); err != nil {
+		return "", err
+	}
+	return shortcutPath, nil
+}
+
+func bindMountDirectory(source, target string) error {
+	if strings.HasPrefix(filepath.Clean(target), filepath.Clean(os.TempDir())+string(filepath.Separator)) {
+		_ = os.Remove(target)
+		return os.Symlink(source, target)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "mount", "--bind", source, target)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bind mount failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func isMountpointPath(path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "mountpoint", "-q", path).Run() == nil
+}
+
+func workspaceRootForShortcut(syncedWorkspacePath string) string {
+	parent := filepath.Dir(filepath.Clean(syncedWorkspacePath))
+	if filepath.Base(parent) == "mounts" {
+		return filepath.Dir(parent)
+	}
+	return parent
+}
+
+func removeSyncedProjectShortcutForPath(projectPath string) {
+	projectPath = filepath.Clean(projectPath)
+	workspaceRoot := workspaceRootForShortcut(filepath.Dir(projectPath))
+	entries, err := os.ReadDir(workspaceRoot)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "#OCP-SyncedProject-") {
+			continue
+		}
+		shortcutPath := filepath.Join(workspaceRoot, entry.Name())
+		if isMountpointPath(shortcutPath) {
+			_ = exec.Command("umount", shortcutPath).Run()
+			_ = os.Remove(shortcutPath)
+			continue
+		}
+		target, err := os.Readlink(shortcutPath)
+		if err == nil && filepath.Clean(target) == projectPath {
+			_ = os.Remove(shortcutPath)
+		}
+	}
+}
+
+func openCodeProjectRefreshHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		projects, err := listMappedSyncedProjects(cfg)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "synced_project_list_failed", "detail": err.Error()})
+			return
+		}
+		registered := 0
+		for _, project := range projects {
+			if strings.TrimSpace(project.LocalPath) == "" {
+				continue
+			}
+			if _, err := ensureSyncedProjectShortcut(workspaceRootForShortcut(filepath.Dir(project.LocalPath)), project.Name, project.LocalPath); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "opencode_project_shortcut_refresh_failed", "detail": err.Error()})
+				return
+			}
+			if err := registerOpenCodeProject(project.Name, project.LocalPath); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "opencode_project_refresh_failed", "detail": err.Error()})
+				return
+			}
+			registered++
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "registered": registered})
+	}
+}
+
+func registerOpenCodeProject(name, localPath string) error {
+	if _, err := os.Stat(localPath); err != nil {
+		return err
+	}
+	dbPath := os.Getenv("OPENCODE_DB_PATH")
+	if strings.TrimSpace(dbPath) == "" {
+		dbPath = "/root/.local/share/opencode/opencode.db"
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return err
+	}
+	cleanPath := filepath.Clean(localPath)
+	if strings.TrimSpace(name) == "" {
+		name = filepath.Base(cleanPath)
+	}
+	now := time.Now().UnixMilli()
+	id := openCodeProjectID(cleanPath)
+	sql := fmt.Sprintf(
+		"INSERT INTO project (id, worktree, vcs, name, icon_url, icon_color, time_created, time_updated, time_initialized, sandboxes, commands, icon_url_override) VALUES (%s, %s, NULL, %s, NULL, NULL, %d, %d, NULL, '[]', NULL, NULL) ON CONFLICT(id) DO UPDATE SET worktree=excluded.worktree, name=excluded.name, time_updated=excluded.time_updated;",
+		sqlQuote(id), sqlQuote(cleanPath), sqlQuote(name), now, now,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, sql)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3 project upsert failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func soulSessionsSyncHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		projects, err := listMappedSyncedProjects(cfg)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "synced_project_list_failed", "detail": err.Error()})
+			return
+		}
+		result := map[string]any{"ok": true, "projects": 0, "exported": 0, "imported": 0, "indexed": 0}
+		for _, project := range projects {
+			if strings.TrimSpace(project.LocalPath) == "" {
+				continue
+			}
+			stats, err := syncOpenCodeProjectSessions(cfg, project)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session_sync_failed", "detail": err.Error()})
+				return
+			}
+			result["projects"] = result["projects"].(int) + 1
+			result["exported"] = result["exported"].(int) + stats["exported"]
+			result["imported"] = result["imported"].(int) + stats["imported"]
+			result["indexed"] = result["indexed"].(int) + stats["indexed"]
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func syncOpenCodeProjectSessions(cfg config, project mappedSyncedProject) (map[string]int, error) {
+	stats := map[string]int{"exported": 0, "imported": 0, "indexed": 0}
+	dbPath := openCodeDBPath()
+	if _, err := os.Stat(dbPath); err != nil {
+		return stats, err
+	}
+	if err := initializeProjectSessionSyncIfMissing(project.LocalPath, project.ProjectID, project.SpaceID, cfg.DeploymentID); err != nil {
+		return stats, err
+	}
+	exported, err := exportOpenCodeSessions(cfg, dbPath, project)
+	if err != nil {
+		return stats, err
+	}
+	stats["exported"] = exported
+	flushRcloneDirCache()
+	_ = pullSessionPayloadsFromRemote(cfg, project)
+	imported, indexed, err := importOpenCodeSessions(cfg, dbPath, project)
+	if err != nil {
+		return stats, err
+	}
+	stats["imported"] = imported
+	stats["indexed"] = indexed
+	return stats, nil
+}
+
+func flushRcloneDirCache() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "pkill", "-HUP", "rclone").Run()
+}
+
+func pullSessionPayloadsFromRemote(cfg config, project mappedSyncedProject) error {
+	remote, local, err := rcloneProjectRemoteAndLocal(cfg, project, filepath.Join(".opencode-plus", "sessions"))
+	if err != nil || remote == "" || local == "" {
+		return err
+	}
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rclone", "copy", remote, local, "--include", "*.json", "--retries", "1", "--low-level-retries", "1", "--stats", "0")
+	cmd.Env = rcloneEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rclone session payload pull failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func rcloneProjectRemoteAndLocal(cfg config, project mappedSyncedProject, projectSubpath string) (string, string, error) {
+	store, err := readMountStore(cfg.MountsDir)
+	if err != nil {
+		return "", "", err
+	}
+	projectPath := filepath.Clean(project.LocalPath)
+	var selected mountConfig
+	for _, mount := range store.Mounts {
+		mountPath := filepath.Clean(mount.MountPath)
+		if mountPath == "." || mountPath == string(filepath.Separator) {
+			continue
+		}
+		prefix := strings.TrimRight(mountPath, string(filepath.Separator)) + string(filepath.Separator)
+		if projectPath == mountPath || strings.HasPrefix(projectPath, prefix) {
+			selected = mount
+			break
+		}
+	}
+	if strings.TrimSpace(selected.MountPath) == "" {
+		return "", "", nil
+	}
+	remoteName := rcloneRemoteName(selected)
+	if remoteName == "" {
+		return "", "", nil
+	}
+	remotePath := firstNonEmpty(selected.Remote["path"], selected.Remote["share"])
+	relativeProject, err := filepath.Rel(filepath.Clean(selected.MountPath), projectPath)
+	if err != nil || strings.HasPrefix(relativeProject, "..") {
+		return "", "", nil
+	}
+	remoteParts := []string{strings.Trim(remotePath, "/")}
+	if relativeProject != "." {
+		remoteParts = append(remoteParts, filepath.ToSlash(relativeProject))
+	}
+	for _, part := range strings.Split(filepath.ToSlash(projectSubpath), "/") {
+		if strings.TrimSpace(part) != "" && part != "." {
+			remoteParts = append(remoteParts, part)
+		}
+	}
+	remote := remoteName + ":" + strings.Trim(strings.Join(remoteParts, "/"), "/")
+	local := filepath.Join(projectPath, projectSubpath)
+	return remote, local, nil
+}
+
+func openCodeDBPath() string {
+	dbPath := os.Getenv("OPENCODE_DB_PATH")
+	if strings.TrimSpace(dbPath) == "" {
+		dbPath = "/root/.local/share/opencode/opencode.db"
+	}
+	return dbPath
+}
+
+func initializeProjectSessionSyncIfMissing(projectPath, projectID, spaceID, deploymentID string) error {
+	manifestPath := filepath.Join(projectPath, ".opencode-plus", "manifest.json")
+	if _, err := os.Stat(manifestPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err := initializeProjectSessionSync(projectPath, projectID, spaceID, deploymentID)
+	return err
+}
+
+func exportOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProject) (int, error) {
+	dirs := equivalentSyncedProjectPaths(project)
+	conditions := make([]string, 0, len(dirs)*2)
+	for _, dir := range dirs {
+		conditions = append(conditions, "directory = "+sqlQuote(dir), "path = "+sqlQuote(strings.TrimLeft(dir, string(filepath.Separator))))
+	}
+	query := "select * from session where time_archived is null and (" + strings.Join(conditions, " or ") + ")"
+	sessions, err := sqliteJSONRows(dbPath, query)
+	if err != nil {
+		return 0, err
+	}
+	exported := 0
+	for _, session := range sessions {
+		sessionID, _ := session["id"].(string)
+		if sessionID == "" {
+			continue
+		}
+		messages, err := sqliteJSONRows(dbPath, "select * from message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+		if err != nil {
+			return exported, err
+		}
+		parts, err := sqliteJSONRows(dbPath, "select * from part where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+		if err != nil {
+			return exported, err
+		}
+		sessionMessages, err := sqliteJSONRows(dbPath, "select * from session_message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+		if err != nil {
+			return exported, err
+		}
+		payload := openCodeSessionPayload{
+			Version:          1,
+			ExportedAt:       time.Now().UTC().Format(time.RFC3339),
+			ProjectID:        project.ProjectID,
+			ProjectName:      project.Name,
+			SourceDeployment: cfg.DeploymentID,
+			Session:          session,
+			Messages:         messages,
+			Parts:            parts,
+			SessionMessages:  sessionMessages,
+		}
+		if err := writeOpenCodeSessionPayload(project.LocalPath, sessionID, payload); err != nil {
+			return exported, err
+		}
+		if err := upsertSyncedSessionIndex(cfg, project, payload); err != nil {
+			return exported, err
+		}
+		exported++
+	}
+	return exported, nil
+}
+
+func importOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProject) (int, int, error) {
+	sessionsDir := filepath.Join(project.LocalPath, ".opencode-plus", "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	imported := 0
+	indexed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		payload, err := readOpenCodeSessionPayload(filepath.Join(sessionsDir, entry.Name()))
+		if err != nil {
+			return imported, indexed, err
+		}
+		sessionID, _ := payload.Session["id"].(string)
+		if sessionID == "" {
+			continue
+		}
+		preferredPath := preferredSyncedProjectOpenPath(project)
+		currentUpdated, _ := sqliteScalarInt(dbPath, "select coalesce(time_updated, 0) from session where id = "+sqlQuote(sessionID))
+		currentDirectory, _ := sqliteScalarString(dbPath, "select coalesce(directory, '') from session where id = "+sqlQuote(sessionID))
+		payloadUpdated := anyInt64(payload.Session["time_updated"])
+		if currentUpdated == 0 || payloadUpdated > currentUpdated || currentDirectory != preferredPath {
+			if err := importOpenCodeSessionPayload(dbPath, preferredPath, payload); err != nil {
+				return imported, indexed, err
+			}
+			imported++
+		}
+		if err := upsertSyncedSessionIndex(cfg, project, payload); err != nil {
+			return imported, indexed, err
+		}
+		indexed++
+	}
+	return imported, indexed, nil
+}
+
+func preferredSyncedProjectOpenPath(project mappedSyncedProject) string {
+	projectPath := filepath.Clean(project.LocalPath)
+	workspaceRoot := workspaceRootForShortcut(filepath.Dir(projectPath))
+	for _, name := range []string{project.Name, filepath.Base(projectPath)} {
+		folderName := sanitizeProjectFolderName(name)
+		if folderName == "" {
+			continue
+		}
+		shortcutPath := filepath.Clean(filepath.Join(workspaceRoot, "#OCP-SyncedProject-"+folderName))
+		if _, err := os.Stat(shortcutPath); err == nil {
+			return shortcutPath
+		}
+	}
+	return projectPath
+}
+
+func equivalentSyncedProjectPaths(project mappedSyncedProject) []string {
+	projectPath := filepath.Clean(project.LocalPath)
+	paths := []string{projectPath}
+	workspaceRoot := workspaceRootForShortcut(filepath.Dir(projectPath))
+	for _, name := range []string{project.Name, filepath.Base(projectPath)} {
+		folderName := sanitizeProjectFolderName(name)
+		if folderName == "" {
+			continue
+		}
+		shortcutPath := filepath.Clean(filepath.Join(workspaceRoot, "#OCP-SyncedProject-"+folderName))
+		if _, err := os.Stat(shortcutPath); err == nil {
+			paths = appendUniquePath(paths, shortcutPath)
+		}
+	}
+	entries, err := os.ReadDir(workspaceRoot)
+	if err != nil {
+		return paths
+	}
+	projectInfo, err := os.Stat(projectPath)
+	if err != nil {
+		return paths
+	}
+	seen := map[string]bool{projectPath: true}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "#OCP-SyncedProject-") {
+			continue
+		}
+		candidate := filepath.Join(workspaceRoot, entry.Name())
+		candidateInfo, err := os.Stat(candidate)
+		if err != nil || !os.SameFile(projectInfo, candidateInfo) {
+			continue
+		}
+		candidate = filepath.Clean(candidate)
+		paths = appendUniquePath(paths, candidate)
+		seen[candidate] = true
+	}
+	return paths
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	for _, existing := range paths {
+		if existing == path {
+			return paths
+		}
+	}
+	return append(paths, path)
+}
+
+func sqliteJSONRows(dbPath, sql string) ([]map[string]any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sqlite3", "-json", dbPath, sql)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("sqlite3 query failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.UseNumber()
+	var rows []map[string]any
+	if err := decoder.Decode(&rows); err != nil && strings.TrimSpace(string(output)) != "" {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func sqliteScalarInt(dbPath, sql string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, sql)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite3 scalar failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" {
+		return 0, nil
+	}
+	return strconv.ParseInt(value, 10, 64)
+}
+
+func sqliteScalarString(dbPath, sql string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, sql)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sqlite3 scalar failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func writeOpenCodeSessionPayload(projectPath, sessionID string, payload openCodeSessionPayload) error {
+	sessionsDir := filepath.Join(projectPath, ".opencode-plus", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	path := filepath.Join(sessionsDir, sessionID+".json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func readOpenCodeSessionPayload(path string) (openCodeSessionPayload, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return openCodeSessionPayload{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload openCodeSessionPayload
+	if err := decoder.Decode(&payload); err != nil {
+		return openCodeSessionPayload{}, err
+	}
+	return payload, nil
+}
+
+func importOpenCodeSessionPayload(dbPath, localPath string, payload openCodeSessionPayload) error {
+	session := copyMap(payload.Session)
+	session["directory"] = filepath.Clean(localPath)
+	session["path"] = strings.TrimLeft(filepath.Clean(localPath), string(filepath.Separator))
+	statements := []string{"begin immediate;"}
+	statements = append(statements, upsertSQL("session", []string{"id", "project_id", "parent_id", "slug", "directory", "title", "version", "share_url", "summary_additions", "summary_deletions", "summary_files", "summary_diffs", "revert", "permission", "time_created", "time_updated", "time_compacting", "time_archived", "workspace_id", "path", "agent", "model"}, session))
+	for _, row := range payload.Messages {
+		statements = append(statements, upsertSQL("message", []string{"id", "session_id", "time_created", "time_updated", "data"}, row))
+	}
+	for _, row := range payload.Parts {
+		statements = append(statements, upsertSQL("part", []string{"id", "message_id", "session_id", "time_created", "time_updated", "data"}, row))
+	}
+	for _, row := range payload.SessionMessages {
+		statements = append(statements, upsertSQL("session_message", []string{"id", "session_id", "type", "time_created", "time_updated", "data"}, row))
+	}
+	statements = append(statements, "commit;")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, strings.Join(statements, "\n"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3 import failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func upsertSQL(table string, columns []string, row map[string]any) string {
+	values := make([]string, 0, len(columns))
+	updates := make([]string, 0, len(columns)-1)
+	for _, column := range columns {
+		values = append(values, sqlValue(row[column]))
+		if column != "id" {
+			updates = append(updates, column+"=excluded."+column)
+		}
+	}
+	return "insert into " + table + " (" + strings.Join(columns, ",") + ") values (" + strings.Join(values, ",") + ") on conflict(id) do update set " + strings.Join(updates, ",") + ";"
+}
+
+func sqlValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return "NULL"
+	case string:
+		return sqlQuote(typed)
+	case json.Number:
+		return typed.String()
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case bool:
+		if typed {
+			return "1"
+		}
+		return "0"
+	default:
+		body, _ := json.Marshal(typed)
+		return sqlQuote(string(body))
+	}
+}
+
+func copyMap(source map[string]any) map[string]any {
+	target := make(map[string]any, len(source))
+	for key, value := range source {
+		target[key] = value
+	}
+	return target
+}
+
+func anyInt64(value any) int64 {
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	case float64:
+		return int64(typed)
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case string:
+		parsed, _ := strconv.ParseInt(typed, 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func upsertSyncedSessionIndex(cfg config, project mappedSyncedProject, payload openCodeSessionPayload) error {
+	sessionID, _ := payload.Session["id"].(string)
+	if sessionID == "" || strings.TrimSpace(cfg.SoulPBURL) == "" {
+		return nil
+	}
+	projectID := firstNonEmpty(payload.ProjectID, project.ProjectID)
+	spaceID := project.SpaceID
+	payloadPath := filepath.ToSlash(filepath.Join(".opencode-plus", "sessions", sessionID+".json"))
+	payloadBody := map[string]any{
+		"session_id":            sessionID,
+		"project_id":            projectID,
+		"space_id":              spaceID,
+		"title":                 stringValue(payload.Session["title"]),
+		"payload_path":          payloadPath,
+		"created_by_deployment": firstNonEmpty(payload.SourceDeployment, cfg.DeploymentID),
+		"updated_by_deployment": cfg.DeploymentID,
+		"status":                "available",
+		"metadata": map[string]any{
+			"time_created": anyInt64(payload.Session["time_created"]),
+			"time_updated": anyInt64(payload.Session["time_updated"]),
+			"project_name": project.Name,
+		},
+	}
+	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("session_id = %q", strings.ReplaceAll(sessionID, `"`, `\"`))}}
+	id, err := firstPocketBaseRecordID(cfg.SoulPBURL, "opcp_synced_sessions", query)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return createPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_sessions", payloadBody)
+	}
+	return patchPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_sessions", id, payloadBody)
+}
+
+func stringValue(value any) string {
+	if typed, ok := value.(string); ok {
+		return typed
+	}
+	return ""
+}
+
+func openCodeProjectID(localPath string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(localPath)))
+	return "opcp_" + fmt.Sprintf("%x", sum[:])[:24]
+}
+
+func sqlQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func sanitizeProjectFolderName(value string) string {
@@ -1152,9 +1957,23 @@ type pocketBaseDeploymentProjectPathRecord struct {
 type mappedSyncedProject struct {
 	ID        string `json:"id"`
 	ProjectID string `json:"project_id"`
+	SpaceID   string `json:"space_id,omitempty"`
 	Name      string `json:"name"`
 	LocalPath string `json:"local_path"`
 	OpenURL   string `json:"open_url"`
+	IconURL   string `json:"icon_url,omitempty"`
+}
+
+type openCodeSessionPayload struct {
+	Version          int              `json:"version"`
+	ExportedAt       string           `json:"exported_at"`
+	ProjectID        string           `json:"project_id"`
+	ProjectName      string           `json:"project_name"`
+	SourceDeployment string           `json:"source_deployment"`
+	Session          map[string]any   `json:"session"`
+	Messages         []map[string]any `json:"messages,omitempty"`
+	Parts            []map[string]any `json:"parts,omitempty"`
+	SessionMessages  []map[string]any `json:"session_messages,omitempty"`
 }
 
 type mappedNamedWorkspace struct {
@@ -1359,8 +2178,10 @@ func listMappedSyncedProjects(cfg config) ([]mappedSyncedProject, error) {
 		}
 	}
 	projectNames := make(map[string]string, len(projects))
+	projectSpaces := make(map[string]string, len(projects))
 	for _, project := range projects {
 		projectNames[project.ID] = project.Name
+		projectSpaces[project.ID] = project.SpaceID
 	}
 	mapped := make([]mappedSyncedProject, 0, len(paths))
 	for _, path := range paths {
@@ -1371,9 +2192,96 @@ func listMappedSyncedProjects(cfg config) ([]mappedSyncedProject, error) {
 			continue
 		}
 		openURL := "/" + encodeOpenCodeProjectPath(path.LocalPath) + "/session"
-		mapped = append(mapped, mappedSyncedProject{ID: path.ID, ProjectID: path.ProjectID, Name: projectNames[path.ProjectID], LocalPath: path.LocalPath, OpenURL: openURL})
+		project := mappedSyncedProject{ID: path.ID, ProjectID: path.ProjectID, SpaceID: projectSpaces[path.ProjectID], Name: projectNames[path.ProjectID], LocalPath: path.LocalPath, OpenURL: openURL}
+		_ = pullProjectIconFromRemote(cfg, project)
+		if iconURL, err := syncedProjectIconDataURL(path.LocalPath); err == nil && iconURL != "" {
+			project.IconURL = iconURL
+			_ = applySyncedProjectIcon(path.LocalPath, project.Name, iconURL)
+		}
+		mapped = append(mapped, project)
 	}
 	return mapped, nil
+}
+
+func pullProjectIconFromRemote(cfg config, project mappedSyncedProject) error {
+	remote, local, err := rcloneProjectRemoteAndLocal(cfg, project, ".opencode-plus")
+	if err != nil || remote == "" || local == "" {
+		return err
+	}
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rclone", "copy", remote, local, "--include", "project-icon.*", "--retries", "1", "--low-level-retries", "1", "--stats", "0")
+	cmd.Env = rcloneEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rclone project icon pull failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func syncedProjectIconDataURL(projectPath string) (string, error) {
+	root := filepath.Join(projectPath, ".opencode-plus")
+	for _, candidate := range []struct {
+		Name string
+		Mime string
+	}{
+		{Name: "project-icon.png", Mime: "image/png"},
+		{Name: "project-icon.jpg", Mime: "image/jpeg"},
+		{Name: "project-icon.gif", Mime: "image/gif"},
+	} {
+		body, err := os.ReadFile(filepath.Join(root, candidate.Name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, _, err := validateProjectIcon(body); err != nil {
+			continue
+		}
+		return "data:" + candidate.Mime + ";base64," + base64.StdEncoding.EncodeToString(body), nil
+	}
+	return "", nil
+}
+
+func applySyncedProjectIcon(projectPath, name, iconURL string) error {
+	if strings.TrimSpace(iconURL) == "" {
+		return nil
+	}
+	dbPath := openCodeDBPath()
+	if _, err := os.Stat(dbPath); err != nil {
+		return err
+	}
+	paths := equivalentSyncedProjectPaths(mappedSyncedProject{Name: name, LocalPath: projectPath})
+	for _, path := range paths {
+		if err := registerOpenCodeProject(name, path); err != nil {
+			return err
+		}
+		if err := updateOpenCodeProjectIcon(dbPath, path, iconURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func updateOpenCodeProjectIcon(dbPath, localPath, iconURL string) error {
+	id := openCodeProjectID(localPath)
+	return updateOpenCodeProjectIconByID(dbPath, id, iconURL)
+}
+
+func updateOpenCodeProjectIconByID(dbPath, id, iconURL string) error {
+	now := time.Now().UnixMilli()
+	sql := fmt.Sprintf("UPDATE project SET icon_url_override=%s, time_updated=%d WHERE id=%s;", sqlQuote(iconURL), now, sqlQuote(id))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "sqlite3", dbPath, sql).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3 project icon update failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func encodeOpenCodeProjectPath(path string) string {
@@ -1404,6 +2312,33 @@ func listSyncedProjects(baseURL string) ([]pocketBaseSyncedProjectRecord, error)
 		return nil, err
 	}
 	return parsed.Items, nil
+}
+
+func findSyncedProjectByRecordID(baseURL, id string) (pocketBaseSyncedProjectRecord, error) {
+	var record pocketBaseSyncedProjectRecord
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/collections/opcp_synced_projects/records/" + url.PathEscape(id)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return pocketBaseSyncedProjectRecord{}, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return pocketBaseSyncedProjectRecord{}, err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode == http.StatusNotFound {
+		return pocketBaseSyncedProjectRecord{}, nil
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return pocketBaseSyncedProjectRecord{}, fmt.Errorf("PocketBase synced project lookup failed: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, &record); err != nil {
+		return pocketBaseSyncedProjectRecord{}, err
+	}
+	return record, nil
 }
 
 func listDeploymentProjectPaths(baseURL, deploymentID string) ([]pocketBaseDeploymentProjectPathRecord, error) {

@@ -451,109 +451,6 @@
     window.setInterval(() => runThinkingWatchdog(false), STALE_THINKING_CHECK_MS);
   }
 
-  function looksLikeOpenProjectDialog(element) {
-    if (!(element instanceof HTMLElement)) return false;
-    const input = element.querySelector("input");
-    const inputText = `${input?.getAttribute("placeholder") || ""} ${input?.getAttribute("aria-label") || ""}`;
-    const hasSearch = /Search folders/i.test(inputText) || /Search folders/i.test(element.textContent || "");
-    const hasTitle = Array.from(element.querySelectorAll("h1,h2,h3,div,span")).some((node) => (node.textContent || "").trim() === "Open project");
-    return hasTitle && hasSearch;
-  }
-
-  function openProjectDialogPanel() {
-    const candidates = Array.from(document.querySelectorAll("div,section,dialog"))
-      .filter((element) => looksLikeOpenProjectDialog(element))
-      .filter((element) => element.querySelector("input"));
-    candidates.sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
-    return candidates[0] || null;
-  }
-
-  async function injectSyncedProjectsIntoOpenDialog(dialog) {
-    if (!(dialog instanceof HTMLElement)) return;
-    const allSections = Array.from(document.querySelectorAll(".ocp-open-project-sync"));
-    const section = allSections[0] || document.createElement("div");
-    allSections.slice(1).forEach((item) => item.remove());
-    if (!section.classList.contains("ocp-open-project-sync")) {
-      section.className = "ocp-open-project-sync";
-    }
-    if (!section.querySelector(".ocp-open-project-sync__list")) {
-      section.innerHTML = `
-        <div class="ocp-open-project-sync__heading"><div class="ocp-open-project-sync__title">Synced projects</div><button type="button" class="ocp-open-project-sync__add">+ Synced project</button></div>
-        <div class="ocp-open-project-sync__list">Loading synced projects...</div>
-      `;
-    }
-    if (dialog.querySelector("input")) {
-      openProjectSearchRow(dialog, dialog.querySelector("input")).insertAdjacentElement("afterend", section);
-    } else {
-      dialog.append(section);
-    }
-    if (section.dataset.loadedFor === location.pathname) return;
-    section.dataset.loadedFor = location.pathname;
-    const list = section.querySelector(".ocp-open-project-sync__list");
-    try {
-      const response = await fetchSyncedProjects();
-      const projects = Array.isArray(response?.projects) ? response.projects : [];
-      if (!projects.length) {
-        list.textContent = "No synced projects configured here yet.";
-        return;
-      }
-      list.innerHTML = projects.map((project) => `
-        <button type="button" class="ocp-open-project-sync__row" data-open-url="${escapeHtml(project.open_url || "")}">
-          <span class="ocp-open-project-sync__icon">▣</span>
-          <span><strong>${escapeHtml(project.name || project.local_path || "Synced project")}</strong><small>${escapeHtml(project.local_path || "")}</small></span>
-        </button>
-      `).join("");
-    } catch (error) {
-      list.textContent = `Synced projects unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    }
-  }
-
-  function openProjectSearchRow(dialog, input) {
-    let row = input;
-    while (row.parentElement && row.parentElement !== dialog) {
-      row = row.parentElement;
-    }
-    return row;
-  }
-
-  function openProjectSectionHeading(dialog, label) {
-    return Array.from(dialog.querySelectorAll("h1,h2,h3,h4,div,span,p")).find((element) => (element.textContent || "").trim() === label) || null;
-  }
-
-  function installOpenProjectDialogEnhancer() {
-    if (window.__opencodePlusOpenProjectEnhancerInstalled) return;
-    window.__opencodePlusOpenProjectEnhancerInstalled = true;
-    let scanTimer = 0;
-    const scheduleScan = () => {
-      window.clearTimeout(scanTimer);
-      scanTimer = window.setTimeout(() => {
-        const panel = openProjectDialogPanel();
-        if (panel) injectSyncedProjectsIntoOpenDialog(panel);
-      }, 120);
-    };
-    document.addEventListener("click", (event) => {
-      const row = event.target.closest?.(".ocp-open-project-sync__row");
-      if (!row) {
-        if (event.target.closest?.(".ocp-open-project-sync__add")) openProjectSyncConfigFromChrome();
-        else scheduleScan();
-        return;
-      }
-      const url = row.dataset.openUrl || "";
-      if (url) window.location.href = url;
-    });
-    scheduleScan();
-  }
-
-  function openProjectSyncConfigFromChrome() {
-    const root = document.getElementById("opencode-plus-drawer");
-    const settings = readSettings();
-    const area = CONFIG_AREAS.find((item) => item.id === "soul");
-    if (!root || !area) return;
-    setOpen(root, settings, true);
-    openConfigArea(root, area, settings);
-    window.setTimeout(() => root.querySelector(".ocp-drawer__sync-project-new")?.click(), 100);
-  }
-
   async function decorateSyncedProjectChrome() {
     let project = null;
     try {
@@ -561,32 +458,33 @@
     } catch {
       return;
     }
-    const badgeKey = project?.local_path || "";
-    if (document.documentElement.dataset.ocpSyncedProjectBadge === badgeKey && document.querySelector(".ocp-synced-project-badge, .ocp-synced-project-rail-badge")) return;
-    document.documentElement.dataset.ocpSyncedProjectBadge = badgeKey;
-    document.querySelectorAll(".ocp-synced-project-badge, .ocp-synced-project-rail-badge").forEach((badge) => badge.remove());
-    if (!project) return;
-    const titleText = project.name || "Synced project";
-    const titleNode = Array.from(document.querySelectorAll("h1,h2,h3,div,span")).find((element) => {
-      const text = (element.textContent || "").trim();
-      return text === titleText || text.includes(project.local_path || "__never__");
+    document.querySelectorAll(".ocp-synced-project-rail-avatar").forEach((button) => {
+      button.classList.remove("ocp-synced-project-rail-avatar");
+      button.style.removeProperty("--ocp-synced-project-icon");
     });
-    if (titleNode instanceof HTMLElement) {
-      const badge = document.createElement("span");
-      badge.className = "ocp-synced-project-badge";
-      badge.textContent = "↻ Synced";
-      badge.title = `Synced project: ${project.local_path}`;
-      titleNode.append(badge);
-    }
+    if (!project?.icon_url) return;
     const railButton = document.querySelector("aside button, nav button, [role='navigation'] button");
     if (railButton instanceof HTMLElement) {
-      railButton.classList.add("ocp-synced-project-rail-anchor");
-      const badge = document.createElement("span");
-      badge.className = "ocp-synced-project-rail-badge";
-      badge.textContent = "↻";
-      badge.title = `Synced project: ${project.local_path}`;
-      railButton.append(badge);
+      railButton.classList.add("ocp-synced-project-rail-avatar");
+      railButton.style.setProperty("--ocp-synced-project-icon", `url("${project.icon_url}")`);
+      railButton.title = project.name ? `${project.name} synced project` : "Synced project";
     }
+  }
+
+  function installSyncedProjectAvatarEnhancer() {
+    if (window.__opencodePlusSyncedProjectAvatarInstalled) return;
+    window.__opencodePlusSyncedProjectAvatarInstalled = true;
+    let timer = 0;
+    const schedule = (delay = 150) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => decorateSyncedProjectChrome().catch(() => {}), delay);
+    };
+    const observer = new MutationObserver(() => schedule(250));
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("popstate", () => schedule(0));
+    window.addEventListener("focus", () => schedule(0));
+    window.addEventListener("pageshow", () => schedule(0));
+    schedule(0);
   }
 
   function syncedProjectSessionURL(project, session) {
@@ -903,15 +801,34 @@
     const response = await fetchSyncedProjects();
     const projects = Array.isArray(response?.projects) ? response.projects : [];
     const current = currentOpenCodeDirectory();
-    return projects.find((project) => project.local_path === current) || null;
+    return projects.find((project) => isCurrentSyncedProject(project, current)) || null;
+  }
+
+  function isCurrentSyncedProject(project, current) {
+    const localPath = project?.local_path || "";
+    if (!localPath) return false;
+    if (localPath === current) return true;
+    if (project?.open_url === location.pathname.replace(/\/session(?:\/.*)?$/, "/session")) return true;
+    const shortcutName = `#OCP-SyncedProject-${localPath.split("/").pop()}`;
+    return current === shortcutName || current.endsWith(`/${shortcutName}`);
+  }
+
+  async function syncSyncedProjectSessions() {
+    const response = await fetch("/__opencode-plus/soul/sessions/sync", { method: "POST", cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
   }
 
   async function fetchSyncedProjectSessions(localPath) {
+    await syncSyncedProjectSessions();
     const response = await fetch("/session", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const sessions = await response.json();
     return (Array.isArray(sessions) ? sessions : [])
-      .filter((session) => session.directory === localPath || session.path === localPath.replace(/^\/+/, ""))
+      .filter((session) => session.directory === localPath || session.path === localPath.replace(/^\/+/, "") || session.directory?.endsWith?.(`#OCP-SyncedProject-${localPath.split("/").pop()}`))
       .filter((session) => !session.time?.archived)
       .sort((a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0));
   }
@@ -938,9 +855,32 @@
     return response.json();
   }
 
+  async function uploadSyncedProjectIcon(id, file) {
+    const form = new FormData();
+    form.append("icon", file);
+    const response = await fetch(`/__opencode-plus/soul/projects/${encodeURIComponent(id)}/icon`, {
+      method: "POST",
+      body: form,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   async function fetchNamedWorkspaces() {
     const response = await fetch("/__opencode-plus/soul/workspaces", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function refreshNativeOpenCodeProjects() {
+    const response = await fetch("/__opencode-plus/opencode/projects/refresh", { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
     return response.json();
   }
 
@@ -2015,12 +1955,12 @@
           <details class="ocp-drawer__sync-check" data-sync-check="provider"><summary><span><strong>Shared storage connected</strong><small>Add Google Drive, SSH/SFTP, or SMB.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="storage-providers">Connect Storage</button></summary><p>This is where the actual synced project folders live, so every OpenCode instance can open the same files.</p></details>
           <details class="ocp-drawer__sync-check" data-sync-check="mapping"><summary><span><strong>Synced workspace folder mapped</strong><small>Choose where synced projects live on this instance.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="workspace-folders">Map Folder</button></summary><p>Maps shared storage into a local folder on this instance. Each server can use a different local path for the same synced workspace.</p></details>
           <details class="ocp-drawer__sync-check" data-sync-check="space"><summary><span><strong>Synced workspace registered</strong><small>Will be created automatically if missing.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Register Current Project</button></summary><p>Names the shared workspace so all instances agree which local folder represents the same synced area.</p></details>
-          <details class="ocp-drawer__sync-check" data-sync-check="project"><summary><span><strong>Current project registered</strong><small>Click register to create or update it.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button ocp-drawer__soul-create-project">Register Current Project</button></summary><p>Links the currently open project path to the synced workspace. This makes the project discoverable on other instances.</p></details>
+          <details class="ocp-drawer__sync-check" data-sync-check="project"><summary><span><strong>Synced project registered</strong><small>Create a synced project below.</small></span><span class="ocp-drawer__sync-check-arrow" aria-hidden="true"></span><button type="button" class="ocp-drawer__button" data-sync-section="synced-projects">View Projects</button></summary><p>Registers at least one project inside a synced workspace folder on this instance. Removing the mapping makes this step pending again.</p></details>
         </div>
         <div class="ocp-drawer__button-row"><button type="button" class="ocp-drawer__button" data-sync-action="refresh">Refresh synchronization status</button></div>
         <p class="ocp-drawer__field-detail ocp-drawer__sync-action-detail">Ready to check this workspace.</p>
       </div>
-      <div class="ocp-drawer__system-section">
+      <div class="ocp-drawer__system-section" data-sync-panel="synced-projects">
         <h4>Synced Projects</h4>
         <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--projects ocp-drawer__profile-shell--list-only">
           <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--projects">
@@ -2029,6 +1969,8 @@
               <button type="button" class="ocp-drawer__button ocp-drawer__sync-project-new">New Synced Project</button>
             </div>
             <p class="ocp-drawer__field-detail">Existing OpenCode projects stay in the native OpenCode UI. This flow is only for new projects that should be shared across instances.</p>
+            <p class="ocp-drawer__field-detail">OpenCode Plus also creates a <code>#OCP-SyncedProject-...</code> shortcut at the workspace root for the native Open Project picker. The first open may briefly show a native stale-read reload warning while the mount settles.</p>
+            <div class="ocp-drawer__synced-project-list">Loading synced projects...</div>
           </div>
           <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--projects" hidden>
             <div class="ocp-drawer__profile-editor-heading">
@@ -2054,7 +1996,7 @@
               <button type="button" class="ocp-drawer__button ocp-drawer__sync-project-cancel-edit">Cancel</button>
               <button type="button" class="ocp-drawer__button ocp-drawer__new-sync-project-open" hidden>Open New Project</button>
             </div>
-            <p class="ocp-drawer__field-detail ocp-drawer__new-sync-project-detail">Available after a synced workspace folder is mapped on this instance.</p>
+            <p class="ocp-drawer__field-detail ocp-drawer__new-sync-project-detail">Available after a synced workspace folder is mapped on this instance. The native picker shortcut may show one stale-read warning the first time it is opened.</p>
           </div>
         </div>
       </div>
@@ -2066,23 +2008,47 @@
         <div class="ocp-drawer__instance-list">Loading known instances...</div>
       </div>
       <div class="ocp-drawer__system-section">
-        <h4>Sync Index</h4>
-        <label class="ocp-drawer__hidden-toggle">
-          <input class="ocp-drawer__sync-db-enabled" type="checkbox">
-          <span>
-            <strong>Use PocketBase sync index</strong>
-            <small>Indexes instances, synced workspaces, synced projects, and future synced sessions. Project files stay in shared storage.</small>
-          </span>
-        </label>
-        <label>
-          <span>PocketBase URL</span>
-          <input class="ocp-drawer__field ocp-drawer__sync-db-url" type="url" placeholder="http://pocketbase:8080" autocomplete="off">
-        </label>
-        <div class="ocp-drawer__button-row">
-          <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-save">Save Database Settings</button>
-          <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-restart">Restart OpenCode Plus</button>
+        <h4>Sync Index Database</h4>
+        <div class="ocp-drawer__profile-shell ocp-drawer__profile-shell--sync-index ocp-drawer__profile-shell--list-only">
+          <div class="ocp-drawer__profile-list-panel ocp-drawer__profile-list-panel--sync-index">
+            <div class="ocp-drawer__profile-panel-header">
+              <span><strong>PocketBase sync index</strong><small>Control-plane index for instances, synced workspaces, synced projects, and future synced sessions.</small></span>
+              <button type="button" class="ocp-drawer__icon-action ocp-drawer__sync-db-edit" aria-label="Edit sync index database" title="Edit sync index database">✎</button>
+            </div>
+            <div class="ocp-drawer__profile-list">
+              <div class="ocp-drawer__profile-card ocp-drawer__sync-db-card">
+                <span class="ocp-drawer__profile-card-copy">
+                  <strong class="ocp-drawer__sync-db-card-title">Checking sync index...</strong>
+                  <em class="ocp-drawer__sync-db-card-status">Checking PocketBase...</em>
+                  <small class="ocp-drawer__sync-db-card-url">Project files stay in shared storage.</small>
+                </span>
+              </div>
+            </div>
+            <p class="ocp-drawer__field-detail ocp-drawer__sync-db-card-detail">Checking database settings...</p>
+          </div>
+          <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--sync-index" hidden>
+            <div class="ocp-drawer__profile-editor-heading">
+              <span><strong>Configure sync index database</strong><small>Save changes, then restart OpenCode Plus to apply them.</small></span>
+            </div>
+            <label class="ocp-drawer__hidden-toggle">
+              <input class="ocp-drawer__sync-db-enabled" type="checkbox">
+              <span>
+                <strong>Use PocketBase sync index</strong>
+                <small>Project files stay in shared storage; PocketBase stores the lightweight index.</small>
+              </span>
+            </label>
+            <label>
+              <span>PocketBase URL</span>
+              <input class="ocp-drawer__field ocp-drawer__sync-db-url" type="url" placeholder="http://pocketbase:8080" autocomplete="off">
+            </label>
+            <div class="ocp-drawer__button-row">
+              <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-save">Save Database Settings</button>
+              <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-restart">Restart OpenCode Plus</button>
+              <button type="button" class="ocp-drawer__button ocp-drawer__sync-db-cancel-edit">Cancel</button>
+            </div>
+            <p class="ocp-drawer__field-detail ocp-drawer__sync-db-detail">Checking database settings...</p>
+          </div>
         </div>
-        <p class="ocp-drawer__field-detail ocp-drawer__sync-db-detail">Checking database settings...</p>
       </div>
       <div class="ocp-drawer__system-section ocp-drawer__sync-storage-providers" data-sync-panel="storage-providers">
         <h4>Shared Storage Accounts</h4>
@@ -2132,11 +2098,15 @@
     const dbEnabled = container.querySelector(".ocp-drawer__sync-db-enabled");
     const dbURL = container.querySelector(".ocp-drawer__sync-db-url");
     const dbDetail = container.querySelector(".ocp-drawer__sync-db-detail");
+    const dbCardTitle = container.querySelector(".ocp-drawer__sync-db-card-title");
+    const dbCardStatus = container.querySelector(".ocp-drawer__sync-db-card-status");
+    const dbCardURL = container.querySelector(".ocp-drawer__sync-db-card-url");
+    const dbCardDetail = container.querySelector(".ocp-drawer__sync-db-card-detail");
 
     setSyncCheck(container, "database", Boolean(status?.enabled && db.connected), db.connected ? "PocketBase is reachable." : "PocketBase is not reachable yet.");
     setSyncCheck(container, "schema", Boolean(status?.schema_ready), status?.schema_ready ? "Required sync-index tables exist." : "Sync-index tables are not initialized yet.");
     setSyncCheck(container, "space", Boolean(status?.named_space_count), status?.named_space_count ? `${status.named_space_count} synced workspace${status.named_space_count === 1 ? "" : "s"} ready.` : "No synced workspace record yet. Register will create one.");
-    setSyncCheck(container, "project", Boolean(status?.project_registered), status?.project_registered ? `Registered ${currentOpenCodeDirectory()}.` : `Current project path: ${currentOpenCodeDirectory()}`);
+    setSyncCheck(container, "project", false, "Checking synced projects registered on this instance...");
 
     if (dbStatus) {
       dbStatus.textContent = status?.enabled
@@ -2145,6 +2115,18 @@
     }
     if (dbEnabled) dbEnabled.checked = Boolean(status?.enabled);
     if (dbURL) dbURL.value = db.url || "";
+    if (dbCardTitle) dbCardTitle.textContent = status?.enabled ? "PocketBase sync index" : "Sync index disabled";
+    if (dbCardStatus) {
+      dbCardStatus.textContent = status?.enabled
+        ? (db.connected ? "Connected" : "Unavailable")
+        : "Disabled";
+    }
+    if (dbCardURL) dbCardURL.textContent = db.url || "No PocketBase URL configured";
+    if (dbCardDetail) {
+      dbCardDetail.textContent = status?.enabled
+        ? `Using ${db.url || "no PocketBase URL configured"}. Project payloads stay in shared storage.`
+        : "The sync index is disabled. OpenCode continues normally.";
+    }
     if (dbDetail) {
       dbDetail.textContent = status?.enabled
         ? `Using ${db.url || "no PocketBase URL configured"}. Save changes, then restart OpenCode Plus to apply them.`
@@ -2227,6 +2209,22 @@
 
   async function setupSoulSyncControls(container, root, settings) {
     let fullSyncReady = false;
+    function showSyncIndexEditor() {
+      container.querySelector(".ocp-drawer__profile-shell--sync-index")?.classList.remove("ocp-drawer__profile-shell--list-only");
+      const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--sync-index");
+      const editorPanel = container.querySelector(".ocp-drawer__profile-editor-panel--sync-index");
+      if (listPanel) listPanel.hidden = true;
+      if (editorPanel) editorPanel.hidden = false;
+    }
+
+    function hideSyncIndexEditor() {
+      container.querySelector(".ocp-drawer__profile-shell--sync-index")?.classList.add("ocp-drawer__profile-shell--list-only");
+      const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--sync-index");
+      const editorPanel = container.querySelector(".ocp-drawer__profile-editor-panel--sync-index");
+      if (listPanel) listPanel.hidden = false;
+      if (editorPanel) editorPanel.hidden = true;
+    }
+
     function showProjectSyncEditor(editing = false) {
       container.querySelector(".ocp-drawer__profile-shell--projects")?.classList.remove("ocp-drawer__profile-shell--list-only");
       const listPanel = container.querySelector(".ocp-drawer__profile-list-panel--projects");
@@ -2261,29 +2259,35 @@
 
     async function refreshSyncedProjectList() {
       const list = container.querySelector(".ocp-drawer__synced-project-list");
-      if (!list) return;
       try {
         const response = await fetchSyncedProjects();
         const projects = Array.isArray(response?.projects) ? response.projects : [];
+        setSyncCheck(container, "project", projects.length > 0, projects.length ? `${projects.length} synced project${projects.length === 1 ? "" : "s"} registered on this instance.` : "No synced projects are registered on this instance.");
+        if (!list) return projects;
         if (!projects.length) {
           list.innerHTML = `<p class="ocp-drawer__field-detail">No synced projects are registered here yet.</p>`;
-          return;
+          return projects;
         }
         list.innerHTML = projects.map((project) => `
           <div class="ocp-drawer__synced-project-row" data-project-mapping-id="${escapeHtml(project.id || "")}" data-project-name="${escapeHtml(project.name || "")}" data-open-url="${escapeHtml(project.open_url || "")}">
+            <span class="ocp-drawer__synced-project-avatar" aria-hidden="true">${project.icon_url ? `<img src="${escapeHtml(project.icon_url)}" alt="">` : escapeHtml((project.name || project.local_path || "S").trim().slice(0, 1).toUpperCase())}</span>
             <span>
               <strong>${escapeHtml(project.name || project.local_path || "Synced project")}</strong>
               <small>${escapeHtml(project.local_path || "")}</small>
             </span>
             <span class="ocp-drawer__instance-actions">
               <button type="button" class="ocp-drawer__button ocp-drawer__synced-project-open" data-open-url="${escapeHtml(project.open_url || "")}">Open</button>
+              <button type="button" class="ocp-drawer__button ocp-drawer__synced-project-icon">Profile Pic</button>
               <button type="button" class="ocp-drawer__icon-action ocp-drawer__synced-project-edit" aria-label="Edit synced project" title="Edit synced project">✎</button>
               <button type="button" class="ocp-drawer__icon-action ocp-drawer__icon-action--danger ocp-drawer__synced-project-delete" aria-label="Remove synced project mapping" title="Remove from this instance">×</button>
             </span>
           </div>
         `).join("");
+        return projects;
       } catch (error) {
-        list.innerHTML = `<p class="ocp-drawer__field-detail">Synced projects unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+        setSyncCheck(container, "project", false, "Synced project list unavailable.");
+        if (list) list.innerHTML = `<p class="ocp-drawer__field-detail">Synced projects unavailable: ${escapeHtml(error instanceof Error ? error.message : String(error))}</p>`;
+        return [];
       }
     }
 
@@ -2319,6 +2323,8 @@
         if (actionDetail) actionDetail.textContent = `Refresh failed: ${message}`;
       }
     }
+
+    if (root) root.__ocpRefreshSoulSync = refreshStatus;
 
     async function refreshNamedWorkspaceOptions(enabled) {
       const select = container.querySelector(".ocp-drawer__new-sync-project-workspace");
@@ -2370,6 +2376,8 @@
       const area = CONFIG_AREAS.find((item) => item.id === "system");
       if (root && area) openConfigArea(root, area, settings);
     });
+    container.querySelector(".ocp-drawer__sync-db-edit")?.addEventListener("click", showSyncIndexEditor);
+    container.querySelector(".ocp-drawer__sync-db-cancel-edit")?.addEventListener("click", hideSyncIndexEditor);
     container.querySelector(".ocp-drawer__instance-list")?.addEventListener("click", async (event) => {
       const button = event.target.closest?.(".ocp-drawer__instance-delete");
       if (!button) return;
@@ -2393,6 +2401,33 @@
       if (openButton) {
         const url = openButton.dataset.openUrl || "";
         if (url) window.location.href = url;
+        return;
+      }
+      const iconButton = event.target.closest?.(".ocp-drawer__synced-project-icon");
+      if (iconButton) {
+        const row = iconButton.closest(".ocp-drawer__synced-project-row");
+        const id = row?.dataset.projectMappingId || "";
+        if (!id) return;
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/png,image/jpeg,image/gif";
+        input.addEventListener("change", async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          iconButton.disabled = true;
+          iconButton.textContent = "Uploading...";
+          try {
+            await uploadSyncedProjectIcon(id, file);
+            await refreshNativeOpenCodeProjects();
+            await refreshSyncedProjectList();
+          } catch (error) {
+            window.alert(`Profile picture upload failed: ${error instanceof Error ? error.message : String(error)}`);
+          } finally {
+            iconButton.disabled = false;
+            iconButton.textContent = "Profile Pic";
+          }
+        }, { once: true });
+        input.click();
         return;
       }
       const editButton = event.target.closest?.(".ocp-drawer__synced-project-edit");
@@ -2459,20 +2494,29 @@
           if (newProjectDetail) newProjectDetail.textContent = "Synced project updated.";
         } else {
           const result = await createNewSynchronizedProject({ name, folder_name: folderName, workspace_id: workspaceID });
-          if (newProjectDetail) {
-            const sessionText = result.session_sync?.enabled ? ` Session sync scaffold: ${result.session_sync.payload_dir}.` : "";
-            newProjectDetail.textContent = `Created ${result.local_path}.${sessionText}`;
-          }
           if (newProjectOpen) {
             newProjectOpen.hidden = false;
             newProjectOpen.onclick = () => { window.location.href = result.open_url; };
           }
+          const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
+          if (actionDetail) actionDetail.textContent = `Created synced project ${result.local_path}.`;
+          await refreshNativeOpenCodeProjects();
+          window.alert("Synced project created and added to OpenCode's local project list. If the native Open project picker is already open, close and reopen it to reload OpenCode's folder list.");
         }
         await refreshSyncedProjectList();
         await refreshStatus();
-        if (editID) hideProjectSyncEditor();
+        clearProjectSyncEditor();
+        hideProjectSyncEditor();
       } catch (error) {
-        if (newProjectDetail) newProjectDetail.textContent = `Create failed: ${error instanceof Error ? error.message : String(error)}`;
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("folder already exists")) {
+          await refreshSyncedProjectList();
+          hideProjectSyncEditor();
+          const actionDetail = container.querySelector(".ocp-drawer__sync-action-detail");
+          if (actionDetail) actionDetail.textContent = "That folder already exists. Open it from the synced project list.";
+        } else if (newProjectDetail) {
+          newProjectDetail.textContent = `Create failed: ${message}`;
+        }
       } finally {
         button.disabled = false;
       }
@@ -2517,6 +2561,7 @@
         const urlInput = container.querySelector(".ocp-drawer__sync-db-url");
         if (urlInput) urlInput.value = saved.soul_pb_url || pbURL;
         if (detail) detail.textContent = "Saved. Restart OpenCode Plus to apply the database settings.";
+        await refreshStatus();
       } catch (error) {
         if (detail) detail.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
       } finally {
@@ -3737,6 +3782,30 @@
       });
   }
 
+  async function refreshSyncedWorkspaceHeader(root) {
+    const button = root.querySelector(".ocp-drawer__sync-refresh-header");
+    if (button) {
+      button.disabled = true;
+      button.classList.add("ocp-drawer__icon-button--spinning");
+    }
+    try {
+      const refreshSync = root.__ocpRefreshSoulSync;
+      if (typeof refreshSync === "function") {
+        await refreshSync();
+      } else {
+        const status = await fetchSoulStatus();
+        updateInstanceBadge(root, status);
+        await Promise.allSettled([fetchNamedWorkspaces(), fetchSyncedProjects()]);
+      }
+      await refreshNativeOpenCodeProjects();
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.classList.remove("ocp-drawer__icon-button--spinning");
+      }
+    }
+  }
+
   function closeModuleConfig(root) {
     const modal = root.querySelector(".ocp-drawer__modal");
     if (modal) modal.hidden = true;
@@ -3832,6 +3901,7 @@
           <div class="ocp-drawer__instance-badge">Instance <strong class="ocp-drawer__instance-name">checking...</strong></div>
         </div>
         <div class="ocp-drawer__header-actions">
+          <button type="button" class="ocp-drawer__icon-button ocp-drawer__sync-refresh-header" aria-label="Refresh OpenCode project folders" title="Refresh OpenCode project folders">⟳</button>
           <button type="button" class="ocp-drawer__icon-button ocp-drawer__opencode-restart-header" aria-label="Restart OpenCode server" title="Restart OpenCode server">↻</button>
           <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
           <button type="button" class="ocp-drawer__close" aria-label="Close OpenCode Plus controls" title="Close">X</button>
@@ -3865,6 +3935,7 @@
 
     panel.querySelector(".ocp-drawer__close").addEventListener("click", () => setOpen(root, settings, false));
     panel.querySelector(".ocp-drawer__help").addEventListener("click", () => openHelp(root));
+    panel.querySelector(".ocp-drawer__sync-refresh-header")?.addEventListener("click", () => refreshSyncedWorkspaceHeader(root));
     wireRestartButton(panel.querySelector(".ocp-drawer__opencode-restart-header"));
     modal.querySelectorAll("[data-modal-close]").forEach((element) => {
       element.addEventListener("click", () => closeModuleConfig(root));
@@ -3891,6 +3962,7 @@
       }
     });
     installStaleThinkingWatchdog();
+    installSyncedProjectAvatarEnhancer();
   }
 
   if (document.readyState === "loading") {
