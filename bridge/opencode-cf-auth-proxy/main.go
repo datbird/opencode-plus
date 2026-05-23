@@ -569,7 +569,8 @@ func healthHandler(upstream *url.URL) http.HandlerFunc {
 }
 
 func shouldRedirectRootRequest(r *http.Request, redirectPath string) bool {
-	if strings.TrimSpace(redirectPath) == "" || r.URL.Path != "/" {
+	redirectPath = strings.TrimSpace(redirectPath)
+	if redirectPath == "" || redirectPath == "/" || r.URL.Path != "/" {
 		return false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

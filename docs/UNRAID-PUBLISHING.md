@@ -10,6 +10,8 @@ unraid/templates/opencode-plus.xml
 
 - Publish public container images for `ghcr.io/datbird/opencode-plus`.
 - Keep `:dev` as the default Unraid template tag unless a smaller default is intentionally chosen.
+- Use the `Publish Images` GitHub Actions workflow to publish `:dev` and `:latest` without handling local PATs.
+- After the first GHCR publish, make the package public in GitHub package settings before submitting to Community Applications.
 - Verify the template XML points at public URLs for `TemplateURL`, `Icon`, `Project`, `Registry`, and `Support`.
 - Create an Unraid forum support thread if Community Applications requires one, then replace the GitHub Issues `Support` URL with that thread.
 - Keep deployment-specific hostnames, emails, tokens, appdata paths, Cloudflare tunnel URLs, and private publishing runbooks out of the XML.
@@ -48,3 +50,12 @@ grep -R "crossmojonation\|/home/robert\|gmail.com\|172\.25\." unraid docs README
 ```
 
 After publishing the template, install it through Unraid Apps rather than a manual `docker run` so Docker Manager labels and template metadata stay attached to the container.
+
+## Local First-Run Smoke Test
+
+The template defaults were smoke-tested with a locally built `opencode-plus:ca-test` image. Expected first-run behavior:
+
+- `opencode-cf-auth-proxy`, `opencode-plus-quota`, `opencode-server`, and `sshd` are running under supervisor.
+- `GET /__opencode-plus/health` on port `4097` returns `ok:true`.
+- With `OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT=false`, the gateway passes through to OpenCode's own Basic Auth instead of requiring a Cloudflare Access JWT on first run.
+- Authenticated requests to `/` return the OpenCode page with `/__opencode-plus/drawer.js` injected.

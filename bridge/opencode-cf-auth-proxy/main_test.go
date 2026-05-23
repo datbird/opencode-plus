@@ -27,6 +27,7 @@ func TestShouldRedirectRootRequest(t *testing.T) {
 		{name: "api root", method: http.MethodPost, path: "/", accept: "application/json", redirectPath: "/workspace/session", want: false},
 		{name: "non root", method: http.MethodGet, path: "/session", accept: "text/html", redirectPath: "/workspace/session", want: false},
 		{name: "disabled", method: http.MethodGet, path: "/", accept: "text/html", redirectPath: "", want: false},
+		{name: "same root disabled", method: http.MethodGet, path: "/", accept: "text/html", redirectPath: "/", want: false},
 	}
 
 	for _, tt := range tests {
