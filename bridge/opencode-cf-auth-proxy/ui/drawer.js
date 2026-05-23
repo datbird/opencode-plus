@@ -2843,9 +2843,9 @@
             <span>Shared storage account</span>
             <select class="ocp-drawer__field ocp-drawer__mount-provider-select" title="Choose one saved shared storage account. The mapping uses that account's saved credentials."></select>
           </label>
-          <label title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
+          <label title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/srv/project'.">
             <span>Remote folder/path</span>
-            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="e.g. opencode-plus or /home/robert/project" title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/home/robert/project'.">
+            <input class="ocp-drawer__field ocp-drawer__mount-path" type="text" placeholder="e.g. opencode-plus or /srv/project" title="Folder/path inside the selected provider. Examples: Google Drive folder 'opencode-plus' or SSH path '/srv/project'.">
           </label>
           <details class="ocp-drawer__browse-panel ocp-drawer__mount-field--hidden" data-mount-field="browse">
             <summary>Browse remote folders</summary>
@@ -3296,7 +3296,7 @@
       if (hostLabel) hostLabel.textContent = "Host";
       if (hostInput) hostInput.placeholder = "server.local";
       if (pathLabel) pathLabel.textContent = "Remote path";
-      if (pathInput) pathInput.placeholder = "/home/robert/project";
+      if (pathInput) pathInput.placeholder = "/srv/project";
       if (portInput && !portInput.value) portInput.placeholder = "22";
       if (providerDetail) providerDetail.textContent = "";
       if (detail) detail.textContent = "SSH/SFTP mounts use SSHFS and can authenticate with a password or private key.";

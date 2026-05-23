@@ -983,7 +983,7 @@
   }
 
   function isRemoteOpenCode() {
-    return location.origin === "https://opencode.crossmojonation.net";
+    return location.protocol === "https:" && !/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(location.hostname);
   }
 
   function maybeRedirectForCloudflareAuthFailure() {

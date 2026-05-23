@@ -111,8 +111,8 @@ func TestPrepareUpstreamRequestStripsPTYOriginHeadersOnlyForConnect(t *testing.T
 	req.Header.Set("Authorization", "Bearer user-token")
 	req.Header.Set("Cf-Access-Jwt-Assertion", "jwt")
 	req.Header.Set("Cf-Access-Authenticated-User-Email", "user@example.com")
-	req.Header.Set("Origin", "https://opencode2.crossmojonation.net")
-	req.Header.Set("Referer", "https://opencode2.crossmojonation.net/session")
+	req.Header.Set("Origin", "https://opencode2.example.com")
+	req.Header.Set("Referer", "https://opencode2.example.com/session")
 
 	prepareUpstreamRequest(req, config{BasicAuthValue: "Basic gateway-token"}, true)
 
@@ -128,16 +128,16 @@ func TestPrepareUpstreamRequestStripsPTYOriginHeadersOnlyForConnect(t *testing.T
 
 func TestPrepareUpstreamRequestPreservesNormalOriginHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pty", nil)
-	req.Header.Set("Origin", "https://opencode2.crossmojonation.net")
-	req.Header.Set("Referer", "https://opencode2.crossmojonation.net/session")
+	req.Header.Set("Origin", "https://opencode2.example.com")
+	req.Header.Set("Referer", "https://opencode2.example.com/session")
 	req.Header.Set("Authorization", "Basic user-token")
 
 	prepareUpstreamRequest(req, config{}, false)
 
-	if got := req.Header.Get("Origin"); got != "https://opencode2.crossmojonation.net" {
+	if got := req.Header.Get("Origin"); got != "https://opencode2.example.com" {
 		t.Fatalf("Origin header = %q, want preserved", got)
 	}
-	if got := req.Header.Get("Referer"); got != "https://opencode2.crossmojonation.net/session" {
+	if got := req.Header.Get("Referer"); got != "https://opencode2.example.com/session" {
 		t.Fatalf("Referer header = %q, want preserved", got)
 	}
 	if got := req.Header.Get("Authorization"); got != "Basic user-token" {
@@ -151,7 +151,7 @@ func TestCorsMiddlewareHandlesPreflight(t *testing.T) {
 		called = true
 	}))
 	req := httptest.NewRequest(http.MethodOptions, "/global/health", nil)
-	req.Header.Set("Origin", "https://opencode.crossmojonation.net")
+	req.Header.Set("Origin", "https://opencode.example.com")
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -162,7 +162,7 @@ func TestCorsMiddlewareHandlesPreflight(t *testing.T) {
 	if got := rec.Code; got != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://opencode.crossmojonation.net" {
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://opencode.example.com" {
 		t.Fatalf("Access-Control-Allow-Origin = %q", got)
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
