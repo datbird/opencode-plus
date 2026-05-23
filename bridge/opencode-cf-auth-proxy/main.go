@@ -168,6 +168,7 @@ func main() {
 	auth := newAuthState(cfg)
 	mounts := newMountManager(cfg)
 	mounts.Start()
+	startSessionSyncReconciler(cfg)
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	originalDirector := proxy.Director
 	proxy.Director = func(r *http.Request) {
@@ -1314,7 +1315,7 @@ func soulSessionsSyncHandler(cfg config) http.HandlerFunc {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "synced_project_list_failed", "detail": err.Error()})
 			return
 		}
-		result := map[string]any{"ok": true, "projects": 0, "exported": 0, "imported": 0, "indexed": 0}
+		result := map[string]any{"ok": true, "projects": 0, "exported": 0, "imported": 0, "indexed": 0, "archived": 0, "skipped": 0}
 		for _, project := range projects {
 			if strings.TrimSpace(project.LocalPath) == "" {
 				continue
@@ -1328,13 +1329,19 @@ func soulSessionsSyncHandler(cfg config) http.HandlerFunc {
 			result["exported"] = result["exported"].(int) + stats["exported"]
 			result["imported"] = result["imported"].(int) + stats["imported"]
 			result["indexed"] = result["indexed"].(int) + stats["indexed"]
+			result["archived"] = result["archived"].(int) + stats["archived"]
+			if _, ok := result["pulled"]; !ok {
+				result["pulled"] = 0
+			}
+			result["pulled"] = result["pulled"].(int) + stats["pulled"]
+			result["skipped"] = result["skipped"].(int) + stats["skipped"]
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
 }
 
 func syncOpenCodeProjectSessions(cfg config, project mappedSyncedProject) (map[string]int, error) {
-	stats := map[string]int{"exported": 0, "imported": 0, "indexed": 0}
+	stats := map[string]int{"exported": 0, "imported": 0, "indexed": 0, "archived": 0, "pulled": 0, "skipped": 0}
 	dbPath := openCodeDBPath()
 	if _, err := os.Stat(dbPath); err != nil {
 		return stats, err
@@ -1342,20 +1349,80 @@ func syncOpenCodeProjectSessions(cfg config, project mappedSyncedProject) (map[s
 	if err := initializeProjectSessionSyncIfMissing(project.LocalPath, project.ProjectID, project.SpaceID, cfg.DeploymentID); err != nil {
 		return stats, err
 	}
+	needed, err := syncedProjectSessionsNeedSync(cfg, dbPath, project)
+	if err != nil {
+		return stats, err
+	}
+	if !needed {
+		stats["skipped"] = 1
+		return stats, nil
+	}
 	exported, err := exportOpenCodeSessions(cfg, dbPath, project)
 	if err != nil {
 		return stats, err
 	}
 	stats["exported"] = exported
 	flushRcloneDirCache()
-	_ = pullSessionPayloadsFromRemote(cfg, project)
+	cacheDir := sessionPayloadCacheDir(project)
+	if err := pullSessionPayloadsFromRemote(cfg, project, cacheDir); err != nil {
+		return stats, err
+	}
+	stats["pulled"] = 1
 	imported, indexed, err := importOpenCodeSessions(cfg, dbPath, project)
 	if err != nil {
 		return stats, err
 	}
 	stats["imported"] = imported
 	stats["indexed"] = indexed
+	cacheImported, cacheIndexed, err := importOpenCodeSessionsFromDir(cfg, dbPath, project, cacheDir)
+	if err != nil {
+		return stats, err
+	}
+	stats["imported"] += cacheImported
+	stats["indexed"] += cacheIndexed
+	archived, err := applyIndexedSessionTombstones(cfg, dbPath, project)
+	if err != nil {
+		return stats, err
+	}
+	stats["archived"] = archived
 	return stats, nil
+}
+
+func startSessionSyncReconciler(cfg config) {
+	if strings.TrimSpace(cfg.SoulPBURL) == "" || strings.TrimSpace(cfg.DeploymentID) == "" {
+		return
+	}
+	go func() {
+		// Let the gateway settle after startup before touching OpenCode's DB.
+		timer := time.NewTimer(25 * time.Second)
+		defer timer.Stop()
+		for {
+			<-timer.C
+			runSessionSyncReconcile(cfg)
+			timer.Reset(2 * time.Minute)
+		}
+	}()
+}
+
+func runSessionSyncReconcile(cfg config) {
+	projects, err := listMappedSyncedProjects(cfg)
+	if err != nil {
+		log.Printf("session sync reconcile skipped: %v", err)
+		return
+	}
+	for _, project := range projects {
+		if strings.TrimSpace(project.LocalPath) == "" {
+			continue
+		}
+		stats, err := syncOpenCodeProjectSessions(cfg, project)
+		if err != nil {
+			log.Printf("session sync reconcile failed for %s: %v", project.LocalPath, err)
+			continue
+		}
+		if stats["exported"] > 0 || stats["imported"] > 0 || stats["indexed"] > 0 || stats["archived"] > 0 {
+			log.Printf("session sync reconciled %s: exported=%d imported=%d indexed=%d archived=%d pulled=%d", project.LocalPath, stats["exported"], stats["imported"], stats["indexed"], stats["archived"], stats["pulled"])
+		}
+	}
 }
 
 func flushRcloneDirCache() {
@@ -1364,10 +1431,13 @@ func flushRcloneDirCache() {
 	_ = exec.CommandContext(ctx, "pkill", "-HUP", "rclone").Run()
 }
 
-func pullSessionPayloadsFromRemote(cfg config, project mappedSyncedProject) error {
+func pullSessionPayloadsFromRemote(cfg config, project mappedSyncedProject, localOverride ...string) error {
 	remote, local, err := rcloneProjectRemoteAndLocal(cfg, project, filepath.Join(".opencode-plus", "sessions"))
 	if err != nil || remote == "" || local == "" {
 		return err
+	}
+	if len(localOverride) > 0 && strings.TrimSpace(localOverride[0]) != "" {
+		local = localOverride[0]
 	}
 	if err := os.MkdirAll(local, 0o755); err != nil {
 		return err
@@ -1381,6 +1451,11 @@ func pullSessionPayloadsFromRemote(cfg config, project mappedSyncedProject) erro
 		return fmt.Errorf("rclone session payload pull failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func sessionPayloadCacheDir(project mappedSyncedProject) string {
+	cacheKey := firstNonEmpty(project.ProjectID, openCodeProjectID(project.LocalPath))
+	return filepath.Join(os.TempDir(), "opencode-plus-session-payloads", sanitizeProjectFolderName(cacheKey))
 }
 
 func rcloneProjectRemoteAndLocal(cfg config, project mappedSyncedProject, projectSubpath string) (string, string, error) {
@@ -1446,13 +1521,149 @@ func initializeProjectSessionSyncIfMissing(projectPath, projectID, spaceID, depl
 	return err
 }
 
+type syncedSessionState struct {
+	ID       string
+	Updated  int64
+	Archived bool
+}
+
+func syncedProjectSessionsNeedSync(cfg config, dbPath string, project mappedSyncedProject) (bool, error) {
+	localSessions, err := localOpenCodeSessionStates(dbPath, project)
+	if err != nil {
+		return false, err
+	}
+	payloads, err := localSessionPayloadStates(project)
+	if err != nil {
+		return false, err
+	}
+	indexed, err := indexedSessionStates(cfg, project)
+	if err != nil {
+		return false, err
+	}
+	for id, local := range localSessions {
+		payload, hasPayload := payloads[id]
+		index, hasIndex := indexed[id]
+		if local.Archived {
+			if !hasIndex || !index.Archived || index.Updated < local.Updated {
+				return true, nil
+			}
+			continue
+		}
+		if !hasPayload || payload.Updated < local.Updated || !hasIndex || index.Updated < local.Updated {
+			return true, nil
+		}
+	}
+	for id := range indexed {
+		local, ok := localSessions[id]
+		if indexed[id].Archived {
+			if ok && (!local.Archived || indexed[id].Updated > local.Updated) {
+				return true, nil
+			}
+			continue
+		}
+		if !ok || indexed[id].Updated > local.Updated || local.Archived {
+			return true, nil
+		}
+	}
+	for id, payload := range payloads {
+		local, ok := localSessions[id]
+		if !ok || payload.Updated > local.Updated || payload.Archived != local.Archived {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func localOpenCodeSessionStates(dbPath string, project mappedSyncedProject) (map[string]syncedSessionState, error) {
+	dirs := equivalentSyncedProjectPaths(project)
+	conditions := make([]string, 0, len(dirs)*2)
+	for _, dir := range dirs {
+		conditions = append(conditions, "directory = "+sqlQuote(dir), "path = "+sqlQuote(strings.TrimLeft(dir, string(filepath.Separator))))
+	}
+	query := "select id, coalesce(time_updated, 0) as time_updated, coalesce(time_archived, 0) as time_archived from session where " + strings.Join(conditions, " or ")
+	rows, err := sqliteJSONRows(dbPath, query)
+	if err != nil {
+		return nil, err
+	}
+	states := map[string]syncedSessionState{}
+	for _, row := range rows {
+		id, _ := row["id"].(string)
+		if id == "" {
+			continue
+		}
+		updated := anyInt64(row["time_updated"])
+		archivedAt := anyInt64(row["time_archived"])
+		if archivedAt > updated {
+			updated = archivedAt
+		}
+		states[id] = syncedSessionState{ID: id, Updated: updated, Archived: archivedAt > 0}
+	}
+	return states, nil
+}
+
+func localSessionPayloadStates(project mappedSyncedProject) (map[string]syncedSessionState, error) {
+	sessionsDir := filepath.Join(project.LocalPath, ".opencode-plus", "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return nil, err
+	}
+	states := map[string]syncedSessionState{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		payload, err := readOpenCodeSessionPayload(filepath.Join(sessionsDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		id, _ := payload.Session["id"].(string)
+		if id == "" {
+			continue
+		}
+		updated := anyInt64(payload.Session["time_updated"])
+		archivedAt := anyInt64(payload.Session["time_archived"])
+		if archivedAt > updated {
+			updated = archivedAt
+		}
+		states[id] = syncedSessionState{ID: id, Updated: updated, Archived: archivedAt > 0}
+	}
+	return states, nil
+}
+
+func indexedSessionStates(cfg config, project mappedSyncedProject) (map[string]syncedSessionState, error) {
+	states := map[string]syncedSessionState{}
+	if strings.TrimSpace(cfg.SoulPBURL) == "" || project.ProjectID == "" {
+		return states, nil
+	}
+	query := url.Values{}
+	query.Set("perPage", "200")
+	query.Set("filter", fmt.Sprintf("project_id=%q", strings.ReplaceAll(project.ProjectID, `"`, `\"`)))
+	var parsed struct {
+		Items []struct {
+			SessionID string         `json:"session_id"`
+			Status    string         `json:"status"`
+			Metadata  map[string]any `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := getPocketBaseJSON(cfg.SoulPBURL, "opcp_synced_sessions", query, &parsed); err != nil {
+		return nil, err
+	}
+	for _, item := range parsed.Items {
+		if item.SessionID == "" {
+			continue
+		}
+		states[item.SessionID] = syncedSessionState{ID: item.SessionID, Updated: anyInt64(item.Metadata["time_updated"]), Archived: item.Status == "archived"}
+	}
+	return states, nil
+}
+
 func exportOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProject) (int, error) {
 	dirs := equivalentSyncedProjectPaths(project)
 	conditions := make([]string, 0, len(dirs)*2)
 	for _, dir := range dirs {
 		conditions = append(conditions, "directory = "+sqlQuote(dir), "path = "+sqlQuote(strings.TrimLeft(dir, string(filepath.Separator))))
 	}
-	query := "select * from session where time_archived is null and (" + strings.Join(conditions, " or ") + ")"
+	query := "select * from session where " + strings.Join(conditions, " or ")
 	sessions, err := sqliteJSONRows(dbPath, query)
 	if err != nil {
 		return 0, err
@@ -1463,17 +1674,22 @@ func exportOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProje
 		if sessionID == "" {
 			continue
 		}
-		messages, err := sqliteJSONRows(dbPath, "select * from message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
-		if err != nil {
-			return exported, err
-		}
-		parts, err := sqliteJSONRows(dbPath, "select * from part where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
-		if err != nil {
-			return exported, err
-		}
-		sessionMessages, err := sqliteJSONRows(dbPath, "select * from session_message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
-		if err != nil {
-			return exported, err
+		var messages []map[string]any
+		var parts []map[string]any
+		var sessionMessages []map[string]any
+		if anyInt64(session["time_archived"]) == 0 {
+			messages, err = sqliteJSONRows(dbPath, "select * from message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+			if err != nil {
+				return exported, err
+			}
+			parts, err = sqliteJSONRows(dbPath, "select * from part where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+			if err != nil {
+				return exported, err
+			}
+			sessionMessages, err = sqliteJSONRows(dbPath, "select * from session_message where session_id = "+sqlQuote(sessionID)+" order by time_created, id")
+			if err != nil {
+				return exported, err
+			}
 		}
 		payload := openCodeSessionPayload{
 			Version:          1,
@@ -1499,6 +1715,10 @@ func exportOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProje
 
 func importOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProject) (int, int, error) {
 	sessionsDir := filepath.Join(project.LocalPath, ".opencode-plus", "sessions")
+	return importOpenCodeSessionsFromDir(cfg, dbPath, project, sessionsDir)
+}
+
+func importOpenCodeSessionsFromDir(cfg config, dbPath string, project mappedSyncedProject, sessionsDir string) (int, int, error) {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return 0, 0, err
@@ -1519,8 +1739,16 @@ func importOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProje
 		}
 		preferredPath := preferredSyncedProjectOpenPath(project)
 		currentUpdated, _ := sqliteScalarInt(dbPath, "select coalesce(time_updated, 0) from session where id = "+sqlQuote(sessionID))
+		currentArchived, _ := sqliteScalarInt(dbPath, "select coalesce(time_archived, 0) from session where id = "+sqlQuote(sessionID))
 		currentDirectory, _ := sqliteScalarString(dbPath, "select coalesce(directory, '') from session where id = "+sqlQuote(sessionID))
-		payloadUpdated := anyInt64(payload.Session["time_updated"])
+		payloadUpdated := maxInt64(anyInt64(payload.Session["time_updated"]), anyInt64(payload.Session["time_archived"]))
+		if currentArchived > 0 && currentArchived >= payloadUpdated {
+			if err := upsertLocalSessionIndex(cfg, project, dbPath, sessionID); err != nil {
+				return imported, indexed, err
+			}
+			indexed++
+			continue
+		}
 		if currentUpdated == 0 || payloadUpdated > currentUpdated || currentDirectory != preferredPath {
 			if err := importOpenCodeSessionPayload(dbPath, preferredPath, payload); err != nil {
 				return imported, indexed, err
@@ -1533,6 +1761,33 @@ func importOpenCodeSessions(cfg config, dbPath string, project mappedSyncedProje
 		indexed++
 	}
 	return imported, indexed, nil
+}
+
+func applyIndexedSessionTombstones(cfg config, dbPath string, project mappedSyncedProject) (int, error) {
+	indexed, err := indexedSessionStates(cfg, project)
+	if err != nil {
+		return 0, err
+	}
+	applied := 0
+	for id, state := range indexed {
+		if !state.Archived || state.Updated == 0 {
+			continue
+		}
+		currentArchived, _ := sqliteScalarInt(dbPath, "select coalesce(time_archived, 0) from session where id = "+sqlQuote(id))
+		currentUpdated, _ := sqliteScalarInt(dbPath, "select coalesce(time_updated, 0) from session where id = "+sqlQuote(id))
+		if currentUpdated == 0 || (currentArchived > 0 && currentArchived >= state.Updated) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cmd := exec.CommandContext(ctx, "sqlite3", dbPath, "update session set time_archived = "+sqlValue(state.Updated)+", time_updated = "+sqlValue(maxInt64(currentUpdated, state.Updated))+" where id = "+sqlQuote(id))
+		output, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			return applied, fmt.Errorf("sqlite3 tombstone apply failed: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		applied++
+	}
+	return applied, nil
 }
 
 func preferredSyncedProjectOpenPath(project mappedSyncedProject) string {
@@ -1692,7 +1947,8 @@ func importOpenCodeSessionPayload(dbPath, localPath string, payload openCodeSess
 	statements = append(statements, "commit;")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, strings.Join(statements, "\n"))
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath)
+	cmd.Stdin = strings.NewReader(strings.Join(statements, "\n"))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sqlite3 import failed: %w: %s", err, strings.TrimSpace(string(output)))
@@ -1760,6 +2016,13 @@ func anyInt64(value any) int64 {
 	}
 }
 
+func maxInt64(a, b int64) int64 {
+	if b > a {
+		return b
+	}
+	return a
+}
+
 func upsertSyncedSessionIndex(cfg config, project mappedSyncedProject, payload openCodeSessionPayload) error {
 	sessionID, _ := payload.Session["id"].(string)
 	if sessionID == "" || strings.TrimSpace(cfg.SoulPBURL) == "" {
@@ -1776,11 +2039,12 @@ func upsertSyncedSessionIndex(cfg config, project mappedSyncedProject, payload o
 		"payload_path":          payloadPath,
 		"created_by_deployment": firstNonEmpty(payload.SourceDeployment, cfg.DeploymentID),
 		"updated_by_deployment": cfg.DeploymentID,
-		"status":                "available",
+		"status":                mapBool(anyInt64(payload.Session["time_archived"]) > 0, "archived", "available"),
 		"metadata": map[string]any{
-			"time_created": anyInt64(payload.Session["time_created"]),
-			"time_updated": anyInt64(payload.Session["time_updated"]),
-			"project_name": project.Name,
+			"time_created":  anyInt64(payload.Session["time_created"]),
+			"time_updated":  maxInt64(anyInt64(payload.Session["time_updated"]), anyInt64(payload.Session["time_archived"])),
+			"time_archived": anyInt64(payload.Session["time_archived"]),
+			"project_name":  project.Name,
 		},
 	}
 	query := url.Values{"perPage": {"1"}, "filter": {fmt.Sprintf("session_id = %q", strings.ReplaceAll(sessionID, `"`, `\"`))}}
@@ -1792,6 +2056,25 @@ func upsertSyncedSessionIndex(cfg config, project mappedSyncedProject, payload o
 		return createPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_sessions", payloadBody)
 	}
 	return patchPocketBaseRecord(cfg.SoulPBURL, "opcp_synced_sessions", id, payloadBody)
+}
+
+func upsertLocalSessionIndex(cfg config, project mappedSyncedProject, dbPath, sessionID string) error {
+	rows, err := sqliteJSONRows(dbPath, "select * from session where id = "+sqlQuote(sessionID))
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	payload := openCodeSessionPayload{
+		Version:          1,
+		ExportedAt:       time.Now().UTC().Format(time.RFC3339),
+		ProjectID:        project.ProjectID,
+		ProjectName:      project.Name,
+		SourceDeployment: cfg.DeploymentID,
+		Session:          rows[0],
+	}
+	return upsertSyncedSessionIndex(cfg, project, payload)
 }
 
 func stringValue(value any) string {

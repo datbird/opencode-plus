@@ -11,6 +11,9 @@
   const STALE_THINKING_CHECK_MS = 15 * 1000;
   const STALE_THINKING_RETURN_REFRESH_MS = 2 * 60 * 1000;
   const STALE_THINKING_SNOOZE_MS = 10 * 60 * 1000;
+  const SYNCED_SESSION_AUTO_DEBOUNCE_MS = 3 * 1000;
+  const SYNCED_SESSION_AUTO_COOLDOWN_MS = 45 * 1000;
+  const SYNCED_SESSION_SAFETY_SYNC_MS = 5 * 60 * 1000;
   const RECOVERY_NOTICE_KEY_PREFIX = "opencodePlusRecoveryNoticeDismissed";
   const DEFAULT_SETTINGS = {
     open: false,
@@ -65,7 +68,7 @@
 
   function isOwnUiNode(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false;
-    return Boolean(node.closest?.("#opencode-plus-drawer, #oc-webui-sidecar, .ocp-stale-thinking, .ocp-recovery-notice"));
+    return Boolean(node.closest?.("#opencode-plus-drawer, #oc-webui-sidecar, .ocp-synced-project-sessions, .ocp-stale-thinking, .ocp-recovery-notice"));
   }
 
   function pageLooksLikeThinking() {
@@ -111,6 +114,34 @@
       </div>
     `;
     document.documentElement.append(notice);
+  }
+
+  function setOpenCodePlusHeaderNotice(root, message, tone = "info") {
+    const notice = root?.querySelector?.(".ocp-drawer__header-notice");
+    if (!notice) return;
+    notice.textContent = message || "";
+    notice.hidden = !message;
+    notice.dataset.tone = tone;
+    updateDrawerPanelHeight(root);
+  }
+
+  function updateDrawerPanelHeight(root) {
+    const panel = root?.querySelector?.(".ocp-drawer__panel");
+    if (panel) root.style.setProperty("--ocp-drawer-panel-height", `${panel.offsetHeight}px`);
+  }
+
+  function withTimeout(promise, timeoutMs, label) {
+    let timer = 0;
+    const timeout = new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer));
+  }
+
+  function scheduleOpenCodeViewRefreshAfterImport(root, sessionSync) {
+    if (!Number(sessionSync?.imported || 0)) return;
+    setOpenCodePlusHeaderNotice(root, "Sessions imported. Refreshing OpenCode view...", "success");
+    window.setTimeout(() => window.location.reload(), 900);
   }
 
   function currentSessionId() {
@@ -612,6 +643,9 @@
     if (window.__opencodePlusSyncedProjectChromeInstalled) return;
     window.__opencodePlusSyncedProjectChromeInstalled = true;
     let timer = 0;
+    let autoSyncTimer = 0;
+    let lastAutoSyncAt = 0;
+    let autoSyncInFlight = false;
     const schedule = (force = false, delay = 180) => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
@@ -621,11 +655,36 @@
         }).catch(() => {});
       }, delay);
     };
+    const scheduleAutoSync = (force = false, delay = SYNCED_SESSION_AUTO_DEBOUNCE_MS) => {
+      window.clearTimeout(autoSyncTimer);
+      autoSyncTimer = window.setTimeout(async () => {
+        if (autoSyncInFlight) return;
+        const now = Date.now();
+        if (!force && now - lastAutoSyncAt < SYNCED_SESSION_AUTO_COOLDOWN_MS) return;
+        let project = null;
+        try {
+          project = await currentSyncedProject();
+        } catch {
+          return;
+        }
+        if (!project) return;
+        autoSyncInFlight = true;
+        try {
+          await syncSyncedProjectSessions();
+          lastAutoSyncAt = Date.now();
+        } catch {
+          // Opportunistic sync should never interrupt normal OpenCode usage.
+        } finally {
+          autoSyncInFlight = false;
+        }
+      }, delay);
+    };
     const wrapHistory = (name) => {
       const original = history[name];
       if (typeof original !== "function") return;
       history[name] = function patchedHistoryMethod(...args) {
         const result = original.apply(this, args);
+        scheduleAutoSync(true, 800);
         schedule(false);
         return result;
       };
@@ -643,6 +702,7 @@
       if (refresh) {
         const panel = refresh.closest(".ocp-synced-project-sessions");
         if (panel?.dataset.localPath) sessionStorage.removeItem(`ocp-synced-project-sessions-hidden:${panel.dataset.localPath}`);
+        scheduleAutoSync(true, 0);
         schedule(true, 0);
         return;
       }
@@ -653,13 +713,48 @@
         removeSyncedProjectSessionPanel();
         return;
       }
+      scheduleAutoSync(false);
       schedule(false, 300);
     });
-    window.addEventListener("popstate", () => schedule(false));
-    window.addEventListener("hashchange", () => schedule(false));
-    window.addEventListener("focus", () => schedule(true));
-    window.addEventListener("pageshow", () => schedule(true));
+    window.addEventListener("popstate", () => {
+      scheduleAutoSync(true, 800);
+      schedule(false);
+    });
+    window.addEventListener("hashchange", () => {
+      scheduleAutoSync(true, 800);
+      schedule(false);
+    });
+    window.addEventListener("focus", () => {
+      scheduleAutoSync(true, 800);
+      schedule(true);
+    });
+    window.addEventListener("pageshow", () => {
+      scheduleAutoSync(true, 800);
+      schedule(true);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      scheduleAutoSync(true, 800);
+      schedule(true);
+    });
+    window.addEventListener("online", () => {
+      scheduleAutoSync(true, 800);
+      schedule(true);
+    });
     window.addEventListener("resize", () => schedule(false, 80));
+    window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      scheduleAutoSync(true, 0);
+    }, SYNCED_SESSION_SAFETY_SYNC_MS);
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.every((mutation) => {
+        const nodes = [mutation.target, ...mutation.addedNodes, ...mutation.removedNodes];
+        return nodes.every((node) => node.nodeType !== Node.ELEMENT_NODE || isOwnUiNode(node));
+      })) return;
+      scheduleAutoSync(false);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    scheduleAutoSync(true, 800);
     schedule(true, 0);
   }
 
@@ -814,7 +909,7 @@
   }
 
   async function syncSyncedProjectSessions() {
-    const response = await fetch("/__opencode-plus/soul/sessions/sync", { method: "POST", cache: "no-store" });
+    const response = await fetch("/__opencode-plus/soul/sessions/sync", { method: "POST", cache: "no-store", credentials: "same-origin" });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.detail || body.error || `HTTP ${response.status}`);
@@ -1215,21 +1310,28 @@
   async function waitForOpenCodeRestartStatus(overlay) {
     const detail = overlay.querySelector(".ocp-drawer__restart-detail");
     const started = Date.now();
-    while (Date.now() - started < 45_000) {
+    while (Date.now() - started < 75_000) {
       try {
         const response = await fetch("/__health", { cache: "no-store" });
         if (response.ok) {
           const status = await response.json();
           if (status?.ok) {
-            if (detail) detail.textContent = "OpenCode is responding again. Refreshing...";
-            window.setTimeout(() => window.location.reload(), 600);
-            return;
+            if (detail) detail.textContent = "OpenCode socket is back. Waiting for sessions...";
+            const sessions = await fetch("/session", { cache: "no-store", credentials: "same-origin" });
+            if (sessions.ok) {
+              const body = await sessions.json().catch(() => null);
+              if (Array.isArray(body)) {
+                if (detail) detail.textContent = "OpenCode is ready. Refreshing...";
+                window.setTimeout(() => window.location.reload(), 900);
+                return;
+              }
+            }
           }
         }
       } catch {
-        // The upstream can briefly disappear while opencode-server restarts.
+        // The upstream can briefly disappear or reject DB-backed requests while restarting.
       }
-      if (detail) detail.textContent = "Restarting OpenCode server...";
+      if (detail && !detail.textContent.includes("Waiting for sessions")) detail.textContent = "Restarting OpenCode server...";
       await new Promise((resolve) => window.setTimeout(resolve, 1_200));
     }
     if (detail) detail.textContent = "Restart queued, but OpenCode did not report ready yet. Refresh manually if needed.";
@@ -1970,6 +2072,7 @@
             </div>
             <p class="ocp-drawer__field-detail">Existing OpenCode projects stay in the native OpenCode UI. This flow is only for new projects that should be shared across instances.</p>
             <p class="ocp-drawer__field-detail">OpenCode Plus also creates a <code>#OCP-SyncedProject-...</code> shortcut at the workspace root for the native Open Project picker. The first open may briefly show a native stale-read reload warning while the mount settles.</p>
+            <p class="ocp-drawer__field-detail">Session sync updates OpenCode's local session database. Native OpenCode does not live-requery sessions imported or archived by OpenCode Plus, so the page may briefly auto-refresh after sync to show the updated sidebar.</p>
             <div class="ocp-drawer__synced-project-list">Loading synced projects...</div>
           </div>
           <div class="ocp-drawer__profile-editor-panel ocp-drawer__profile-editor-panel--projects" hidden>
@@ -2371,7 +2474,7 @@
         panel?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
-    container.querySelector("[data-sync-action='refresh']")?.addEventListener("click", refreshStatus);
+    container.querySelector("[data-sync-action='refresh']")?.addEventListener("click", () => refreshSyncedWorkspaceHeader(root));
     container.querySelector("[data-sync-action='identity-help']")?.addEventListener("click", () => {
       const area = CONFIG_AREAS.find((item) => item.id === "system");
       if (root && area) openConfigArea(root, area, settings);
@@ -3784,20 +3887,38 @@
 
   async function refreshSyncedWorkspaceHeader(root) {
     const button = root.querySelector(".ocp-drawer__sync-refresh-header");
+    const syncDetail = root.querySelector(".ocp-drawer__sync-action-detail");
     if (button) {
       button.disabled = true;
       button.classList.add("ocp-drawer__icon-button--spinning");
     }
+    if (syncDetail) syncDetail.textContent = "Refreshing OpenCode Plus...";
+    setOpenCodePlusHeaderNotice(root, "Refreshing OpenCode Plus...", "info");
     try {
       const refreshSync = root.__ocpRefreshSoulSync;
+      const sessionSync = await withTimeout(syncSyncedProjectSessions(), 75_000, "Session sync");
       if (typeof refreshSync === "function") {
-        await refreshSync();
+        await withTimeout(refreshSync(), 20_000, "Synchronization status refresh");
       } else {
-        const status = await fetchSoulStatus();
+        const status = await withTimeout(fetchSoulStatus(), 10_000, "Synchronization status refresh");
         updateInstanceBadge(root, status);
-        await Promise.allSettled([fetchNamedWorkspaces(), fetchSyncedProjects()]);
+        await Promise.allSettled([withTimeout(fetchNamedWorkspaces(), 10_000, "Workspace refresh"), withTimeout(fetchSyncedProjects(), 10_000, "Project refresh")]);
       }
-      await refreshNativeOpenCodeProjects();
+      await withTimeout(refreshNativeOpenCodeProjects(), 10_000, "OpenCode project refresh");
+      if (syncDetail) {
+        const changed = Number(sessionSync?.exported || 0) + Number(sessionSync?.imported || 0) + Number(sessionSync?.indexed || 0);
+        const message = changed
+          ? `OpenCode Plus refreshed. Sessions exported ${sessionSync.exported || 0}, imported ${sessionSync.imported || 0}, indexed ${sessionSync.indexed || 0}.`
+          : "OpenCode Plus refreshed. No session changes needed.";
+        syncDetail.textContent = message;
+        setOpenCodePlusHeaderNotice(root, message, "success");
+      }
+      scheduleOpenCodeViewRefreshAfterImport(root, sessionSync);
+    } catch (error) {
+      const message = `OpenCode Plus refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (syncDetail) syncDetail.textContent = message;
+      setOpenCodePlusHeaderNotice(root, message, "error");
+      throw error;
     } finally {
       if (button) {
         button.disabled = false;
@@ -3813,8 +3934,7 @@
 
   function setOpen(root, settings, open) {
     settings.open = open;
-    const panel = root.querySelector(".ocp-drawer__panel");
-    if (panel) root.style.setProperty("--ocp-drawer-panel-height", `${panel.offsetHeight}px`);
+    updateDrawerPanelHeight(root);
     root.classList.toggle("ocp-drawer--open", open);
     root.querySelector(".ocp-drawer__handle-text").textContent = "OpenCode Plus";
     writeSettings(settings);
@@ -3899,10 +4019,11 @@
           <div class="ocp-drawer__eyebrow">Enhancement Suite</div>
           <h2>OpenCode Plus Controls</h2>
           <div class="ocp-drawer__instance-badge">Instance <strong class="ocp-drawer__instance-name">checking...</strong></div>
+          <div class="ocp-drawer__header-notice" role="status" hidden></div>
         </div>
         <div class="ocp-drawer__header-actions">
-          <button type="button" class="ocp-drawer__icon-button ocp-drawer__sync-refresh-header" aria-label="Refresh OpenCode project folders" title="Refresh OpenCode project folders">⟳</button>
-          <button type="button" class="ocp-drawer__icon-button ocp-drawer__opencode-restart-header" aria-label="Restart OpenCode server" title="Restart OpenCode server">↻</button>
+          <button type="button" class="ocp-drawer__icon-button ocp-drawer__sync-refresh-header" aria-label="Refresh OpenCode Plus" title="Refresh OpenCode Plus"><span class="ocp-drawer__icon-glyph" aria-hidden="true">⇄</span></button>
+          <button type="button" class="ocp-drawer__icon-button ocp-drawer__opencode-restart-header" aria-label="Restart OpenCode server" title="Restart OpenCode server"><span class="ocp-drawer__icon-glyph" aria-hidden="true">⏻</span></button>
           <button type="button" class="ocp-drawer__help" aria-label="OpenCode Plus help" title="OpenCode Plus help">?</button>
           <button type="button" class="ocp-drawer__close" aria-label="Close OpenCode Plus controls" title="Close">X</button>
         </div>
