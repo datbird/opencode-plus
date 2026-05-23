@@ -26,7 +26,8 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_PLUS_SOUL_PB_URL`: PocketBase URL for Soul Sync metadata. Defaults to `http://pocketbase:8080`.
 - `OPENCODE_PLUS_DEPLOYMENT_ID`: stable deployment identity for DB-backed sync records. Set this explicitly for each container, such as `opencode1` or `opencode2`.
 - `OPENCODE_PLUS_DEPLOYMENT_NAME`: human-readable deployment name shown in the drawer. Set this explicitly with the same stable container identity unless a friendlier label is needed.
-- `OPENCODE_PLUS_SOURCE_REPO_DIR`: local OpenCode Plus source repo used for the instance build/commit badge. Defaults to `/root/gitrepos/opencode-ubuntu-container`.
+- `OPENCODE_PLUS_SOURCE_REPO_DIR`: optional local OpenCode Plus source repo used for the instance build/commit badge. Defaults to empty.
+- `OPENCODE_CONFIG_FILE`: OpenCode JSON config file edited by the hidden settings panel. Defaults to `/root/workspace/opencode.json`.
 - `TZ`: container timezone.
 
 ## Workspace Environment Variables

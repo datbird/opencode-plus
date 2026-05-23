@@ -384,7 +384,7 @@
 
   function currentOpenCodeDirectory() {
     const encoded = location.pathname.split("/").filter(Boolean)[0];
-    if (!encoded) return "/root/aiplayground";
+    if (!encoded) return "/root/workspace";
     try {
       const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
       const binary = atob(padded);
@@ -392,9 +392,9 @@
       const decoded = new TextDecoder().decode(bytes);
       if (decoded.startsWith("/")) return decoded;
       if (decoded.startsWith("root/")) return `/${decoded}`;
-      return "/root/aiplayground";
+      return "/root/workspace";
     } catch {
-      return "/root/aiplayground";
+      return "/root/workspace";
     }
   }
 

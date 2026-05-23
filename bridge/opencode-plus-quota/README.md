@@ -13,17 +13,11 @@ Start it with:
 ./start.sh
 ```
 
-When used from the AI Playground support copy, the path is:
-
-```bash
-/root/aiplayground/opencode-enhancement-suite-bridge/start.sh
-```
-
 Gemini quota source is controlled by `OPENCODE_PLUS_CONFIG_FILE` and defaults to `auto`. Auto checks the encrypted OpenCode Plus provider vault under `OPENCODE_PLUS_SECRETS_DIR`, then `~/.gemini/oauth_creds.json`, then compatible OpenCode OAuth provider entries from `~/.local/share/opencode/auth.json`. Override the CLI file fallback with `GEMINI_OAUTH_CREDS_PATH=/path/to/oauth_creds.json` if needed.
 
 OpenAI usage uses OpenCode's native OAuth entry from `~/.local/share/opencode/auth.json` by default and calls `https://chatgpt.com/backend-api/wham/usage` directly. Override the auth file with `OPENCODE_AUTH_PATH=/path/to/auth.json` if needed.
 
-OpenRouter account credits use `OPENROUTER_MANAGEMENT_KEY` and the official `https://openrouter.ai/api/v1/credits` endpoint. `OPENROUTER_API_KEY` is accepted as a fallback env var name, but OpenRouter requires a management key for this endpoint. When env vars are absent, the bridge checks the encrypted OpenCode Plus provider vault, then tries 1Password item `OpenRouter.ai Management Key` in the `Private` vault.
+OpenRouter account credits use `OPENROUTER_MANAGEMENT_KEY` and the official `https://openrouter.ai/api/v1/credits` endpoint. `OPENROUTER_API_KEY` is accepted as a fallback env var name, but OpenRouter requires a management key for this endpoint. When env vars are absent, the bridge checks the encrypted OpenCode Plus provider vault, then optional local 1Password CLI items if configured.
 
 Known current limitations:
 

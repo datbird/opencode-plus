@@ -84,6 +84,31 @@ func TestAuthStatePersistsCloudflareAuthToggle(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesGenericPublicDefaults(t *testing.T) {
+	t.Setenv("ALLOWED_EMAILS", "user@example.com")
+	t.Setenv("CF_ACCESS_SKIP_AUD", "true")
+	t.Setenv("OPENCODE_BASIC_USER", "opencode")
+	t.Setenv("OPENCODE_BASIC_PASSWORD", "password")
+	t.Setenv("OPENCODE_PLUS_CONFIG_FILE", filepath.Join(t.TempDir(), "opencode-plus-config.json"))
+	t.Setenv("OPENCODE_ROOT_REDIRECT_PATH", "")
+	t.Setenv("OPENCODE_CONFIG_FILE", "")
+	t.Setenv("OPENCODE_PLUS_SOURCE_REPO_DIR", "")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.RootRedirectPath != "/" {
+		t.Fatalf("RootRedirectPath = %q, want /", cfg.RootRedirectPath)
+	}
+	if cfg.OpenCodeConfigFile != "/root/workspace/opencode.json" {
+		t.Fatalf("OpenCodeConfigFile = %q", cfg.OpenCodeConfigFile)
+	}
+	if cfg.SourceRepoDir != "" {
+		t.Fatalf("SourceRepoDir = %q, want empty", cfg.SourceRepoDir)
+	}
+}
+
 func TestIsPTYConnectRequest(t *testing.T) {
 	tests := []struct {
 		path string
@@ -260,7 +285,7 @@ func TestMountManagerCreateRedactsSecretsAndPersists(t *testing.T) {
 			"password": "should-redact",
 		},
 		Options: mountOptions{ReadOnly: true, AutoReconnect: true},
-		Secret:  mountSecret{Username: "robert", Password: "secret"},
+		Secret:  mountSecret{Username: "user", Password: "secret"},
 	})
 	if err != nil {
 		t.Fatalf("create mount: %v", err)
@@ -287,7 +312,7 @@ func TestMountManagerUpdateProviderPreservesBlankSecrets(t *testing.T) {
 		Name:   "Server",
 		Type:   "ssh",
 		Remote: map[string]string{"host": "old.example", "port": "22"},
-		Secret: mountSecret{Username: "robert", Password: "old-password", PrivateKey: "old-key"},
+		Secret: mountSecret{Username: "user", Password: "old-password", PrivateKey: "old-key"},
 	})
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
@@ -308,7 +333,7 @@ func TestMountManagerUpdateProviderPreservesBlankSecrets(t *testing.T) {
 	secret := manager.secrets[id]
 	provider := manager.providers[id]
 	manager.mu.Unlock()
-	if secret.Password != "old-password" || secret.PrivateKey != "old-key" || secret.Username != "robert" {
+	if secret.Password != "old-password" || secret.PrivateKey != "old-key" || secret.Username != "user" {
 		t.Fatalf("secret was not preserved: %#v", secret)
 	}
 	if provider.Remote["host"] != "new.example" || provider.Remote["port"] != "2200" {
@@ -346,7 +371,7 @@ func TestConfigHandlerSavesInstanceName(t *testing.T) {
 }
 
 func TestNormalizeInstanceNameRejectsUnsafeValues(t *testing.T) {
-	if got := normalizeInstanceName("  Robert   Laptop  "); got != "Robert Laptop" {
+	if got := normalizeInstanceName("  Workstation   One  "); got != "Workstation One" {
 		t.Fatalf("normalizeInstanceName spaces = %q", got)
 	}
 	if got := normalizeInstanceName("bad/name"); got != "" {

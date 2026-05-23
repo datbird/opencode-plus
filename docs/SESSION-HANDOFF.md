@@ -35,12 +35,12 @@ Persist these paths under `/config/persist/root`:
 - `.config/opencode`: config, memories, and project instructions.
 - `.local/share/opencode`: auth, sessions, database, logs, and tool outputs.
 - `.cache/opencode`: cache/model metadata.
-- `.mymcp`: mymcp credential registry, encrypted 1Password renewal state, and active op session cache.
-- `.config/op`: 1Password CLI account configuration required before `OP_SESSION_*` values can be used.
+- Optional credential-helper state, such as `.mymcp`, when local automation depends on it.
+- `.config/op`: optional 1Password CLI account configuration required before `OP_SESSION_*` values can be used.
 - `.config/gh`: GitHub CLI auth if desired.
 - `.ssh`: SSH keys and known hosts if desired.
 
-The support credential paths above are not direct bind mounts in the current live containers. They must exist under `/config/persist/root` so the entrypoint's startup restore recreates them after container restart/recreate. If a live repair copies `.mymcp` or `.config/op` from another container into `/root`, immediately sync it back into `/config/persist/root`; otherwise the fix only lives in the Docker overlay and will disappear on recreate.
+Support credential paths that are not direct bind mounts should exist under `/config/persist/root` so the entrypoint's startup restore recreates them after container restart or recreation. If a live repair copies support credential state into `/root`, immediately sync it back into `/config/persist/root`; otherwise the fix only lives in the Docker overlay and will disappear on recreate.
 
 Do not bake credentials, session databases, personal memories, provider auth, SSH keys, or workspace data into the image.
 
@@ -73,10 +73,8 @@ The local source directory name may be historical; the public project name is Op
 
 The gateway/proxy source is part of this repository under `bridge/opencode-cf-auth-proxy/`. The compiled proxy binary should be produced by Docker or local `go build` from that source; do not treat an external loose checkout or copied binary as canonical.
 
-The quota bridge source is part of this repository under `bridge/opencode-plus-quota/`. If live testing edits `/root/aiplayground/opencode-enhancement-suite-bridge/`, copy accepted changes back into `bridge/opencode-plus-quota/` before building or committing.
+The quota bridge source is part of this repository under `bridge/opencode-plus-quota/`. Treat that directory as canonical; any live-testing copies should be discarded or copied back before building or committing.
 
 ## Publishing Auth
 
-Use your own registry credentials or CI secrets when publishing. Do not store tokens in Git remotes, global Git config, Docker image layers, or public docs.
-
-For Robert's live `datbird/opencode-plus` repo pushes from the Unraid/OpenCode environment, use the private workspace/project docs as the source of truth. Current live procedure: renew 1Password through `mymcp`, retrieve the `GitHub PAT Token (Unraid)` item from the `Private` vault, and pass it through a one-shot Git credential helper for `git push`. If `mymcp` cannot renew because local encrypted state is missing, restore `/root/.mymcp` and `/root/.config/op/config` from the live OpenCode Plus persistent state before asking Robert for manual auth. Never commit credentials or bypass GitHub push protection.
+Use your own registry credentials or CI secrets when publishing. Do not store tokens in Git remotes, global Git config, Docker image layers, or public docs. Keep deployment-specific publishing runbooks in private workspace documentation, not in this repository.
