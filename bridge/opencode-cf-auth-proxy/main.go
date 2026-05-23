@@ -40,28 +40,30 @@ import (
 var embeddedUI embed.FS
 
 type config struct {
-	ListenAddr          string
-	UpstreamURL         string
-	AllowedEmails       map[string]struct{}
-	AccessAudience      string
-	SkipAudience        bool
-	BasicAuthValue      string
-	TrustedIssuerSuffix string
-	RootRedirectPath    string
-	UIEnabled           bool
-	UIAssetDir          string
-	AuthStateFile       string
-	QuotaURL            string
-	SecretsDir          string
-	ConfigFile          string
-	OpenCodeConfigFile  string
-	MountsDir           string
-	SoulDBEnabled       bool
-	SoulPBURL           string
-	DeploymentID        string
-	DeploymentName      string
-	DeploymentIDStable  bool
-	SourceRepoDir       string
+	ListenAddr               string
+	UpstreamURL              string
+	AllowedEmails            map[string]struct{}
+	AccessAudience           string
+	SkipAudience             bool
+	BasicAuthValue           string
+	TrustedIssuerSuffix      string
+	RootRedirectPath         string
+	UIEnabled                bool
+	UIAssetDir               string
+	AuthStateFile            string
+	QuotaURL                 string
+	SecretsDir               string
+	ConfigFile               string
+	OpenCodeConfigFile       string
+	MountsDir                string
+	SoulDBEnabled            bool
+	SoulPBURL                string
+	DeploymentID             string
+	DeploymentName           string
+	DeploymentIDStable       bool
+	SourceRepoDir            string
+	CloudflareAuthDefault    bool
+	CloudflareAuthDefaultSet bool
 }
 
 type plusConfig struct {
@@ -316,26 +318,28 @@ func prepareUpstreamRequest(r *http.Request, cfg config, cloudflareAuthEnabled b
 
 func loadConfig() (config, error) {
 	cfg := config{
-		ListenAddr:          env("LISTEN_ADDR", ":4097"),
-		UpstreamURL:         env("UPSTREAM_URL", "http://127.0.0.1:4096"),
-		AccessAudience:      strings.TrimSpace(os.Getenv("CF_ACCESS_AUD")),
-		SkipAudience:        strings.EqualFold(os.Getenv("CF_ACCESS_SKIP_AUD"), "true"),
-		TrustedIssuerSuffix: env("TRUSTED_CF_ISSUER_SUFFIX", ".cloudflareaccess.com"),
-		RootRedirectPath:    env("OPENCODE_ROOT_REDIRECT_PATH", "/"),
-		UIEnabled:           envBool("OPENCODE_PLUS_UI_ENABLED", false),
-		UIAssetDir:          strings.TrimSpace(os.Getenv("OPENCODE_PLUS_UI_ASSET_DIR")),
-		AuthStateFile:       env("OPENCODE_PLUS_AUTH_STATE_FILE", "/config/persist/opencode-plus-auth-state.json"),
-		QuotaURL:            env("OPENCODE_PLUS_QUOTA_URL", "http://127.0.0.1:18765/quota"),
-		SecretsDir:          env("OPENCODE_PLUS_SECRETS_DIR", "/config/persist/opencode-plus-secrets"),
-		ConfigFile:          env("OPENCODE_PLUS_CONFIG_FILE", "/config/persist/opencode-plus-config.json"),
-		OpenCodeConfigFile:  env("OPENCODE_CONFIG_FILE", "/root/workspace/opencode.json"),
-		MountsDir:           env("OPENCODE_PLUS_MOUNTS_DIR", "/config/persist/opencode-plus-mounts"),
-		SoulDBEnabled:       envBool("OPENCODE_PLUS_SOUL_DB_ENABLED", true),
-		SoulPBURL:           strings.TrimRight(env("OPENCODE_PLUS_SOUL_PB_URL", "http://pocketbase:8080"), "/"),
-		DeploymentID:        env("OPENCODE_PLUS_DEPLOYMENT_ID", env("HOSTNAME", "opencode-plus")),
-		DeploymentName:      env("OPENCODE_PLUS_DEPLOYMENT_NAME", env("HOSTNAME", "OpenCode Plus")),
-		DeploymentIDStable:  strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_ID")) != "",
-		SourceRepoDir:       env("OPENCODE_PLUS_SOURCE_REPO_DIR", ""),
+		ListenAddr:               env("LISTEN_ADDR", ":4097"),
+		UpstreamURL:              env("UPSTREAM_URL", "http://127.0.0.1:4096"),
+		AccessAudience:           strings.TrimSpace(os.Getenv("CF_ACCESS_AUD")),
+		SkipAudience:             strings.EqualFold(os.Getenv("CF_ACCESS_SKIP_AUD"), "true"),
+		TrustedIssuerSuffix:      env("TRUSTED_CF_ISSUER_SUFFIX", ".cloudflareaccess.com"),
+		RootRedirectPath:         env("OPENCODE_ROOT_REDIRECT_PATH", "/"),
+		UIEnabled:                envBool("OPENCODE_PLUS_UI_ENABLED", false),
+		UIAssetDir:               strings.TrimSpace(os.Getenv("OPENCODE_PLUS_UI_ASSET_DIR")),
+		AuthStateFile:            env("OPENCODE_PLUS_AUTH_STATE_FILE", "/config/persist/opencode-plus-auth-state.json"),
+		QuotaURL:                 env("OPENCODE_PLUS_QUOTA_URL", "http://127.0.0.1:18765/quota"),
+		SecretsDir:               env("OPENCODE_PLUS_SECRETS_DIR", "/config/persist/opencode-plus-secrets"),
+		ConfigFile:               env("OPENCODE_PLUS_CONFIG_FILE", "/config/persist/opencode-plus-config.json"),
+		OpenCodeConfigFile:       env("OPENCODE_CONFIG_FILE", "/root/workspace/opencode.json"),
+		MountsDir:                env("OPENCODE_PLUS_MOUNTS_DIR", "/config/persist/opencode-plus-mounts"),
+		SoulDBEnabled:            envBool("OPENCODE_PLUS_SOUL_DB_ENABLED", true),
+		SoulPBURL:                strings.TrimRight(env("OPENCODE_PLUS_SOUL_PB_URL", "http://pocketbase:8080"), "/"),
+		DeploymentID:             env("OPENCODE_PLUS_DEPLOYMENT_ID", env("HOSTNAME", "opencode-plus")),
+		DeploymentName:           env("OPENCODE_PLUS_DEPLOYMENT_NAME", env("HOSTNAME", "OpenCode Plus")),
+		DeploymentIDStable:       strings.TrimSpace(os.Getenv("OPENCODE_PLUS_DEPLOYMENT_ID")) != "",
+		SourceRepoDir:            env("OPENCODE_PLUS_SOURCE_REPO_DIR", ""),
+		CloudflareAuthDefault:    envBool("OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT", true),
+		CloudflareAuthDefaultSet: true,
 	}
 	plusCfg := readPlusConfig(cfg)
 	if plusCfg.SoulDBEnabled != nil && strings.TrimSpace(os.Getenv("OPENCODE_PLUS_SOUL_DB_ENABLED")) == "" {
@@ -382,8 +386,12 @@ func loadConfig() (config, error) {
 }
 
 func newAuthState(cfg config) *authState {
+	cloudflareAuthDefault := true
+	if cfg.CloudflareAuthDefaultSet {
+		cloudflareAuthDefault = cfg.CloudflareAuthDefault
+	}
 	state := &authState{
-		cfAuthEnabled: true,
+		cfAuthEnabled: cloudflareAuthDefault,
 		stateFile:     strings.TrimSpace(cfg.AuthStateFile),
 	}
 	if state.stateFile == "" {

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>OpenCode-Plus</Name>
+  <Repository>ghcr.io/datbird/opencode-plus:dev</Repository>
+  <Registry>https://github.com/datbird/opencode-plus/pkgs/container/opencode-plus</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/datbird/opencode-plus/issues</Support>
+  <Project>https://github.com/datbird/opencode-plus</Project>
+  <Overview>OpenCode Plus packages OpenCode Server with a durable Ubuntu-based development environment, persistent workspace state, SSH access, an optional Cloudflare Access aware gateway, and OpenCode Plus UI/status enhancements.</Overview>
+  <Category>Productivity: Tools: Cloud:</Category>
+  <WebUI>http://[IP]:[PORT:4097]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/datbird/opencode-plus/main/unraid/templates/opencode-plus.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/datbird/opencode-plus/main/unraid/opencode-plus.svg</Icon>
+  <ExtraParams>--label net.unraid.docker.managed=dockerman --label net.unraid.docker.webui=http://[IP]:[PORT:4097]/ --label net.unraid.docker.icon=https://raw.githubusercontent.com/datbird/opencode-plus/main/unraid/opencode-plus.svg</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/opencode-plus" Mode="rw" Description="Persistent OpenCode Plus configuration, logs, gateway state, and restored root state." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/opencode-plus</Config>
+  <Config Name="Workspace" Target="/root/workspace" Default="/mnt/user/appdata/opencode-workspace" Mode="rw" Description="Default OpenCode workspace directory. Use a share or appdata path that should hold project/session documentation and non-repo workspace files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/opencode-workspace</Config>
+  <Config Name="Repositories" Target="/root/repos" Default="/mnt/user/gitrepos" Mode="rw" Description="Optional directory for local Git clones used inside OpenCode Plus." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/gitrepos</Config>
+  <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Optional host Docker socket for Docker-aware agents, Docker CLI, Compose, and devcontainer workflows. Remove this mapping if you do not want the container to control Docker." Type="Path" Display="advanced" Required="false" Mask="false">/var/run/docker.sock</Config>
+  <Config Name="Gateway Web UI Port" Target="4097" Default="4097" Mode="tcp" Description="OpenCode Plus gateway and injected UI. Use this port for the WebUI when OPENCODE_CF_AUTH_ENABLED is true." Type="Port" Display="always" Required="true" Mask="false">4097</Config>
+  <Config Name="Direct OpenCode Port" Target="4096" Default="4096" Mode="tcp" Description="Direct OpenCode server port. Use only on trusted networks or when the Cloudflare Access gateway is disabled." Type="Port" Display="advanced" Required="false" Mask="false">4096</Config>
+  <Config Name="SSH Port" Target="22" Default="2222" Mode="tcp" Description="SSH access for remote editors and terminal workflows." Type="Port" Display="always" Required="true" Mask="false">2222</Config>
+  <Config Name="Timezone" Target="TZ" Default="America/Chicago" Mode="" Description="Container timezone." Type="Variable" Display="always" Required="false" Mask="false">America/Chicago</Config>
+  <Config Name="Root SSH Password" Target="ROOT_PASSWORD" Default="" Mode="" Description="Root SSH password inside the container. Set a strong password before enabling SSH access from untrusted networks." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="OpenCode Username" Target="OPENCODE_SERVER_USERNAME" Default="opencode" Mode="" Description="OpenCode server Basic Auth username." Type="Variable" Display="always" Required="true" Mask="false">opencode</Config>
+  <Config Name="OpenCode Password" Target="OPENCODE_SERVER_PASSWORD" Default="" Mode="" Description="OpenCode server Basic Auth password. Set a strong password." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Enhancement Mode" Target="OPENCODE_PLUS_ENHANCEMENT_MODE" Default="true" Mode="" Description="Enables OpenCode Plus runtime behavior including SSH, state restore, compatibility paths, gateway support, and worktree enforcement. Set false for plain OpenCode server mode." Type="Variable" Display="advanced" Required="true" Mask="false">true</Config>
+  <Config Name="Gateway Enabled" Target="OPENCODE_CF_AUTH_ENABLED" Default="true" Mode="" Description="Starts the OpenCode Plus gateway on port 4097. Cloudflare Access checks require CF_ACCESS_AUD and ALLOWED_EMAILS unless CF_ACCESS_SKIP_AUD is true." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="OpenCode Plus UI Enabled" Target="OPENCODE_PLUS_UI_ENABLED" Default="true" Mode="" Description="Injects the OpenCode Plus drawer and status UI through the gateway." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="Cloudflare Auth Default" Target="OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT" Default="false" Mode="" Description="Initial gateway auth mode when no saved auth state exists. False lets first-run Unraid installs use OpenCode's own login through the gateway; set true when publishing behind Cloudflare Access from the start." Type="Variable" Display="advanced" Required="true" Mask="false">false</Config>
+  <Config Name="Gateway Listen Address" Target="OPENCODE_CF_AUTH_LISTEN_ADDR" Default="0.0.0.0:4097" Mode="" Description="Address used by the gateway process inside the container." Type="Variable" Display="advanced" Required="true" Mask="false">0.0.0.0:4097</Config>
+  <Config Name="Allowed Emails" Target="ALLOWED_EMAILS" Default="you@example.com" Mode="" Description="Comma-separated email allowlist for Cloudflare Access authenticated users. Keep this aligned with your Cloudflare Access policy." Type="Variable" Display="advanced" Required="true" Mask="false">you@example.com</Config>
+  <Config Name="Cloudflare Access Audience" Target="CF_ACCESS_AUD" Default="" Mode="" Description="Cloudflare Access audience tag for the protected application. Required unless Skip Cloudflare Audience Check is true." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Skip Cloudflare Audience Check" Target="CF_ACCESS_SKIP_AUD" Default="true" Mode="" Description="Set false and provide CF_ACCESS_AUD for stricter Cloudflare Access JWT validation. Default true makes first-run local setup easier while still requiring allowed emails when the gateway is enabled." Type="Variable" Display="advanced" Required="true" Mask="false">true</Config>
+  <Config Name="OpenCode Workspace Dir" Target="OPENCODE_WORKSPACE_DIR" Default="/root/workspace" Mode="" Description="Internal workspace path where opencode serve starts." Type="Variable" Display="advanced" Required="true" Mask="false">/root/workspace</Config>
+  <Config Name="OpenCode Repos Dir" Target="OPENCODE_REPOS_DIR" Default="/root/repos" Mode="" Description="Internal repository path for local Git clones." Type="Variable" Display="advanced" Required="true" Mask="false">/root/repos</Config>
+  <Config Name="Deployment ID" Target="OPENCODE_PLUS_DEPLOYMENT_ID" Default="opencode-plus" Mode="" Description="Stable identity for sync/backplane records. Use a unique value for each container, such as opencode-plus or opencode-plus-2." Type="Variable" Display="advanced" Required="false" Mask="false">opencode-plus</Config>
+  <Config Name="Deployment Name" Target="OPENCODE_PLUS_DEPLOYMENT_NAME" Default="OpenCode Plus" Mode="" Description="Human-readable instance name shown in the OpenCode Plus drawer." Type="Variable" Display="advanced" Required="false" Mask="false">OpenCode Plus</Config>
+</Container>

@@ -84,6 +84,13 @@ func TestAuthStatePersistsCloudflareAuthToggle(t *testing.T) {
 	}
 }
 
+func TestAuthStateUsesConfiguredCloudflareDefault(t *testing.T) {
+	state := newAuthState(config{CloudflareAuthDefault: false, CloudflareAuthDefaultSet: true})
+	if state.cloudflareAuthEnabled() {
+		t.Fatal("Cloudflare auth should honor configured false default")
+	}
+}
+
 func TestLoadConfigUsesGenericPublicDefaults(t *testing.T) {
 	t.Setenv("ALLOWED_EMAILS", "user@example.com")
 	t.Setenv("CF_ACCESS_SKIP_AUD", "true")
@@ -93,6 +100,7 @@ func TestLoadConfigUsesGenericPublicDefaults(t *testing.T) {
 	t.Setenv("OPENCODE_ROOT_REDIRECT_PATH", "")
 	t.Setenv("OPENCODE_CONFIG_FILE", "")
 	t.Setenv("OPENCODE_PLUS_SOURCE_REPO_DIR", "")
+	t.Setenv("OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT", "")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -106,6 +114,12 @@ func TestLoadConfigUsesGenericPublicDefaults(t *testing.T) {
 	}
 	if cfg.SourceRepoDir != "" {
 		t.Fatalf("SourceRepoDir = %q, want empty", cfg.SourceRepoDir)
+	}
+	if !cfg.CloudflareAuthDefault {
+		t.Fatal("CloudflareAuthDefault = false, want true")
+	}
+	if !cfg.CloudflareAuthDefaultSet {
+		t.Fatal("CloudflareAuthDefaultSet = false, want true")
 	}
 }
 

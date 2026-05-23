@@ -111,6 +111,7 @@ PY
     printf 'OPENCODE_PLUS_UI_ENABLED=%q\n' "${OPENCODE_PLUS_UI_ENABLED:-false}"
     printf 'OPENCODE_PLUS_UI_ASSET_DIR=%q\n' "${OPENCODE_PLUS_UI_ASSET_DIR:-/config/persist/opencode-plus-ui}"
     printf 'OPENCODE_PLUS_AUTH_STATE_FILE=%q\n' "${OPENCODE_PLUS_AUTH_STATE_FILE:-/config/persist/opencode-plus-auth-state.json}"
+    printf 'OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT=%q\n' "${OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT:-true}"
     printf 'OPENCODE_PLUS_QUOTA_URL=%q\n' "${OPENCODE_PLUS_QUOTA_URL:-http://127.0.0.1:18765/quota}"
     printf 'OPENCODE_PLUS_SECRETS_DIR=%q\n' "${OPENCODE_PLUS_SECRETS_DIR:-/config/persist/opencode-plus-secrets}"
     printf 'OPENCODE_PLUS_CONFIG_FILE=%q\n' "${plus_config_file}"

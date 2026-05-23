@@ -12,6 +12,7 @@ Documentation:
 
 - [Configuration](docs/CONFIGURATION.md)
 - [Unraid Deployment](docs/UNRAID.md)
+- [Unraid Community Applications Publishing](docs/UNRAID-PUBLISHING.md)
 - [Development and Publishing](docs/DEVELOPMENT.md)
 - [Session and Memory Handoff](docs/SESSION-HANDOFF.md)
 

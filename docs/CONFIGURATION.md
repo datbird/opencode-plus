@@ -21,6 +21,7 @@ OpenCode Plus is configured through Docker environment variables, persistent fil
 - `OPENCODE_PLUS_ENHANCEMENT_MODE`: enables OpenCode Plus runtime behavior. Defaults to `true`. Set to `false` for a plain OpenCode server.
 - `OPENCODE_PLUS_UI_ENABLED`: injects OpenCode Plus browser UI assets through the gateway when set to `true`. Defaults to `false`.
 - `OPENCODE_PLUS_UI_ASSET_DIR`: optional live asset directory for `drawer.js` and `drawer.css`, useful for testing UI changes without rebuilding the image.
+- `OPENCODE_PLUS_CLOUDFLARE_AUTH_DEFAULT`: initial Cloudflare Access enforcement state used when no auth state file exists. Defaults to `true`; set `false` for local gateway/UI installs that should pass through to OpenCode's own login first.
 - `OPENCODE_PLUS_MOUNTS_DIR`: persistent file mount configuration directory. Defaults to `/config/persist/opencode-plus-mounts`.
 - `OPENCODE_PLUS_SOUL_DB_ENABLED`: enables database-backed Soul Sync readiness checks. Defaults to `true`.
 - `OPENCODE_PLUS_SOUL_PB_URL`: PocketBase URL for Soul Sync metadata. Defaults to `http://pocketbase:8080`.

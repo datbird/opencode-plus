@@ -59,6 +59,8 @@ When creating an Unraid template, include Docker Manager labels so Unraid recogn
 - `net.unraid.docker.webui=http://<container-ip-or-host>:4097/`
 - `net.unraid.docker.icon=<icon-url>`
 
+The repository includes a Community Applications-ready template at `unraid/templates/opencode-plus.xml`. See `docs/UNRAID-PUBLISHING.md` for the submission checklist.
+
 ## Persistent OpenCode State
 
 Place copied OpenCode state under:
